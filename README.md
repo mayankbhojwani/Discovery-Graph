@@ -1,4 +1,4 @@
-# 🌐 SynapseHorizon: Graph-Driven Research & Innovation Engine
+# 🌐 Discovery-Graph: Graph-Driven Research & Innovation Engine
 
 **An executive-level B2B knowledge discovery platform that uncovers hidden connections and pathways between disparate domains of human knowledge using graph topology.**
 
