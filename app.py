@@ -3,7 +3,7 @@ import time
 import sqlite3
 from database import initialize_db, seed_mock_data
 from engine import CuriosityEngine
-from pipeline import harvest_ego_network, save_realm_to_db
+from pipeline import ingest_horizon_data
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -228,18 +228,15 @@ if "selected_realm" not in st.session_state:
         )
         if st.button("🔌 Construct Graph Database", key="btn_manifest_welcome", use_container_width=True):
             if custom_topic.strip():
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                cb = make_progress_callback(progress_bar, status_text)
-                nodes, edges = harvest_ego_network(custom_topic, limit_hop1=15, progress_callback=cb)
-                if nodes:
-                    save_realm_to_db(custom_topic, nodes, edges)
-                    st.session_state.selected_realm = custom_topic
-                    st.success(f"Graph constructed successfully for '{custom_topic}'. Loading workspace...")
-                    time.sleep(0.8)
-                    st.rerun()
-                else:
-                    st.error("No pages found for the seed topic. Try another search term.")
+                with st.spinner("Querying Wikidata Semantic Graph Network..."):
+                    count = ingest_horizon_data(custom_topic, db_path="curiosity.db")
+                    if count > 0:
+                        st.session_state.selected_realm = custom_topic
+                        st.success(f"Graph constructed successfully for '{custom_topic}' with {count} relationships. Loading workspace...")
+                        time.sleep(0.8)
+                        st.rerun()
+                    else:
+                        st.error("No Wikidata concepts found for the seed topic. Try another search term.")
             else:
                 st.warning("Please type a topic core.")
 
@@ -319,6 +316,19 @@ with c_left:
             st.rerun()
         else:
             st.error(f"'{seed_input}' not found in active graph. Search terms are case-sensitive.")
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Sync with Wikidata button
+    st.markdown('<div class="b2b-btn" style="margin-top: 8px;">', unsafe_allow_html=True)
+    if st.button("🌐 Sync with Wikidata Core", use_container_width=True):
+        with st.spinner("Querying Wikidata Semantic Graph Network..."):
+            count = ingest_horizon_data(st.session_state.selected_realm, db_path="curiosity.db")
+            if count > 0:
+                st.toast(f"🚀 Ingestion complete! Synced {count} premium structured relationships into local graph.")
+                time.sleep(1.0)
+                st.rerun()
+            else:
+                st.error("Failed to query Wikidata. Please verify your internet connection or seed name.")
     st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
@@ -417,5 +427,48 @@ with c_right:
                 
                 st.markdown('<div class="profile-section-title">💡 Open Innovation Question</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="profile-section-body">{profile.get("open_innovation_question", "Details not loaded.")}</div>', unsafe_allow_html=True)
+                
+        # ─── Algorithmic Path Evaluation ───
+        metrics = engine.evaluate_path_metrics(path)
+        
+        st.markdown("---")
+        st.markdown("### 📊 Algorithmic Path Evaluation")
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric(
+                label="Serendipity Index", 
+                value=f"{metrics['serendipity']:.2f}",
+                help="Measures average log-inverse degree. High values indicate discovery pathways that traverse niche, less-connected nodes."
+            )
+        with col_m2:
+            st.metric(
+                label="Bridge Centrality", 
+                value=f"{metrics['bridge_factor']:.4f}",
+                help="Measures average betweenness centrality. High values indicate intermediate nodes that cross-link distinct topical clusters."
+            )
+        with col_m3:
+            comp = metrics['composite_score']
+            if comp >= 0.8:
+                label = "OPTIMAL"
+            elif comp >= 0.6:
+                label = "EXCELLENT"
+            elif comp >= 0.4:
+                label = "STABLE"
+            else:
+                label = "STANDARD"
+            st.metric(
+                label="Composite Score", 
+                value=f"{comp * 100:.1f}%",
+                delta=label,
+                help="Normalized discovery index balancing serendipity and bridge bottleneck centrality."
+            )
+            
+        st.info(
+            "💡 **Topological Benchmarking Insight:**\n\n"
+            "The **Serendipity Index** calculates the inverse log-degree to verify if this pathway leverages less-connected, niche nodes to bypass standard informational hubs. "
+            "The **Bridge Centrality** tracks how successfully the path routes through high-betweenness bottlenecks that link disparate semantic clusters. "
+            "A higher **Composite Score** indicates a pathway that maximizes obscure knowledge connections while crossing structural bottlenecks."
+        )
     else:
         st.info("Select an innovation track from the center column to compile a deep-dive intelligence brief.")

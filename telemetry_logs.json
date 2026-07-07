@@ -1,0 +1,103 @@
+[
+  {
+    "timestamp": "2026-07-07T13:43:50.842585",
+    "seed_topic": "Kevin De Bruyne",
+    "realm": "Kevin De Bruyne",
+    "tracks": [
+      {
+        "track_index": 1,
+        "path": [
+          "Kevin De Bruyne",
+          "Ballon d'Or",
+          "Belgian Sportsman of the Year"
+        ],
+        "metrics": {
+          "serendipity": 0.45511961331341866,
+          "bridge_factor": 0.026618774697245527,
+          "composite_score": 0.21825347451425336
+        }
+      },
+      {
+        "track_index": 2,
+        "path": [
+          "Kevin De Bruyne",
+          "2014\u201315 DFB-Pokal",
+          "VfL Wolfsburg",
+          "Bundesliga"
+        ],
+        "metrics": {
+          "serendipity": 0.536004484460499,
+          "bridge_factor": 0.015675149520722964,
+          "composite_score": 0.2178560352886404
+        }
+      }
+    ]
+  },
+  {
+    "timestamp": "2026-07-07T13:46:54.499176",
+    "seed_topic": "AI",
+    "realm": "AI",
+    "tracks": [
+      {
+        "track_index": 1,
+        "path": [
+          "AI",
+          "AI aftermath scenarios",
+          "AI alignment",
+          "AI data center",
+          "Graphics processing unit"
+        ],
+        "metrics": {
+          "serendipity": 0.3462200049914621,
+          "bridge_factor": 0.005872573161130378,
+          "composite_score": 0.1300881012333133
+        }
+      },
+      {
+        "track_index": 2,
+        "path": [
+          "AI",
+          "AI aftermath scenarios",
+          "AI alignment",
+          "Deepfake pornography",
+          "Engineering"
+        ],
+        "metrics": {
+          "serendipity": 0.33437568599702927,
+          "bridge_factor": 0.008073395720685588,
+          "composite_score": 0.13164205130072373
+        }
+      },
+      {
+        "track_index": 3,
+        "path": [
+          "AI",
+          "AI aftermath scenarios",
+          "AI alignment",
+          "Chinese room",
+          "Computer science"
+        ],
+        "metrics": {
+          "serendipity": 0.33419128992762265,
+          "bridge_factor": 0.009183405836503978,
+          "composite_score": 0.13435561123380083
+        }
+      },
+      {
+        "track_index": 4,
+        "path": [
+          "AI",
+          "AI aftermath scenarios",
+          "AI alignment",
+          "Automated planning and scheduling",
+          "Automated reasoning"
+        ],
+        "metrics": {
+          "serendipity": 0.33400982983036287,
+          "bridge_factor": 0.008159660958168427,
+          "composite_score": 0.13173576233887535
+        }
+      }
+    ]
+  }
+]

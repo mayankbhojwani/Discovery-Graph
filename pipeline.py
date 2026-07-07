@@ -1,228 +1,197 @@
-import urllib.request
-import urllib.parse
-import json
+import requests
 import sqlite3
-import networkx as nx
-from concurrent.futures import ThreadPoolExecutor
+import re
 
-WIKI_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
+WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
+USER_AGENT = "SynapseHorizon/1.0 (contact@synapsehorizon.com) Python-requests/2.0"
 
-import time
+def get_wikidata_entity(label):
+    """Resolves a human label to a Wikidata Qid and normalized label."""
+    params = {
+        "action": "wbsearchentities",
+        "search": label,
+        "language": "en",
+        "format": "json"
+    }
+    headers = {"User-Agent": USER_AGENT}
+    try:
+        r = requests.get(WIKIDATA_API_URL, params=params, headers=headers, timeout=10)
+        data = r.json()
+        if data.get("search"):
+            # Return Qid, normalized label, and description
+            first_match = data["search"][0]
+            return first_match["id"], first_match["label"], first_match.get("description", "A semantic Wikidata concept.")
+    except Exception as e:
+        print(f"Error searching Wikidata entity: {e}")
+    return None, None, None
 
-def fetch_json(url, params):
-    """Utility to fetch JSON from API with proper headers to avoid blocks, including rate-limit retry handling."""
-    query_string = urllib.parse.urlencode(params)
-    full_url = f"{url}?{query_string}"
+def fetch_wikidata_2hop(seed_keyword):
+    """
+    Queries Wikidata via SPARQL to construct a 2-hop semantic network.
+    Returns:
+      edges: list of tuples (source_label, target_label, relationship_type)
+      node_descriptions: dict mapping node_label -> description
+    """
+    qid, seed_label, seed_desc = get_wikidata_entity(seed_keyword)
+    if not qid:
+        return [], {}
+    
+    node_descriptions = {seed_label: seed_desc}
+    edges = []
+    
+    # ─── Hop 1 Query ───
+    # Find all direct claims from the seed entity
+    hop1_query = f"""
+    SELECT ?propLabel ?targetLabel ?target ?targetDescription WHERE {{
+      VALUES ?item {{ wd:{qid} }}
+      ?item ?p ?target .
+      ?property wikibase:directClaim ?p .
+      ?property rdfs:label ?propLabel .
+      FILTER(LANG(?propLabel) = "en") .
+      ?target rdfs:label ?targetLabel .
+      FILTER(LANG(?targetLabel) = "en") .
+      OPTIONAL {{
+        ?target schema:description ?targetDescription .
+        FILTER(LANG(?targetDescription) = "en") .
+      }}
+    }} LIMIT 50
+    """
     
     headers = {
-        'User-Agent': 'CuriosityEngineBot/3.0 (anita@example.com) Python-urllib/3.0'
+        "User-Agent": USER_AGENT,
+        "Accept": "application/sparql-results+json"
     }
     
-    req = urllib.request.Request(full_url, headers=headers)
-    max_retries = 4
-    for attempt in range(max_retries):
-        try:
-            # Subtle delay of 50ms before requests to prevent triggering rate limiters
-            time.sleep(0.05)
-            with urllib.request.urlopen(req) as response:
-                return json.loads(response.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries - 1:
-                # Exponential backoff: sleep 0.5s, 1.0s, 2.0s
-                time.sleep(0.5 * (2 ** attempt))
-                continue
-            raise e
-        except Exception as e:
-            raise e
-
-def get_section0_links(title):
-    """Fetches list of standard article links in Section 0 (introduction) of a page."""
-    params = {
-        "action": "parse",
-        "page": title,
-        "section": 0,
-        "prop": "links",
-        "format": "json",
-        "redirects": 1
-    }
+    target_qids = []
     try:
-        res = fetch_json(WIKI_API_URL, params)
-        if "parse" in res and "links" in res["parse"]:
-            links = res["parse"]["links"]
-            # ns=0 indicates main article namespace, filtering templates/files/categories
-            return [link["*"] for link in links if link.get("ns") == 0]
+        r = requests.get(WIKIDATA_SPARQL_URL, params={"query": hop1_query, "format": "json"}, headers=headers, timeout=15)
+        res_data = r.json()
+        bindings = res_data.get("results", {}).get("bindings", [])
+        
+        for b in bindings:
+            prop_label = b["propLabel"]["value"]
+            target_label = b["targetLabel"]["value"]
+            target_url = b["target"]["value"]
+            target_desc = b.get("targetDescription", {}).get("value", f"A Wikidata concept related to {target_label}.")
+            
+            # Extract Qid from URL
+            m = re.search(r"Q\d+", target_url)
+            if m:
+                target_qid = m.group(0)
+                target_qids.append(target_qid)
+                
+            edges.append((seed_label, target_label, prop_label))
+            node_descriptions[target_label] = target_desc
+            
     except Exception as e:
-        print(f"Error fetching section 0 links for '{title}': {e}")
-    return []
+        print(f"Error in Wikidata Hop 1 SPARQL query: {e}")
+        return [], {}
 
-def harvest_ego_network(seed_node, limit_hop1=15, progress_callback=None):
+    if not target_qids:
+        return edges, node_descriptions
+
+    # ─── Hop 2 Query ───
+    # Batch query top 12 targets to get Hop 2 connections
+    batch_qids = target_qids[:12]
+    values_clause = " ".join([f"wd:{q}" for q in batch_qids])
+    
+    hop2_query = f"""
+    SELECT ?itemLabel ?propLabel ?targetLabel ?targetDescription WHERE {{
+      VALUES ?item {{ {values_clause} }}
+      ?item ?p ?target .
+      ?property wikibase:directClaim ?p .
+      ?property rdfs:label ?propLabel .
+      FILTER(LANG(?propLabel) = "en") .
+      ?target rdfs:label ?targetLabel .
+      FILTER(LANG(?targetLabel) = "en") .
+      OPTIONAL {{
+        ?target schema:description ?targetDescription .
+        FILTER(LANG(?targetDescription) = "en") .
+      }}
+      ?item rdfs:label ?itemLabel .
+      FILTER(LANG(?itemLabel) = "en") .
+    }} LIMIT 100
     """
-    Builds a 2-hop ego network around the seed_node.
-    - Hop 1: fetches links in seed_node's introduction.
-    - Hop 2: fetches links in the introduction of top limit_hop1 Hop 1 pages in parallel.
-    - Resolves all outbound intro links for the entire pool in parallel.
-    - Prunes isolated nodes and dead-ends.
-    - Returns (nodes, edges) lists.
+    
+    try:
+        r = requests.get(WIKIDATA_SPARQL_URL, params={"query": hop2_query, "format": "json"}, headers=headers, timeout=15)
+        res_data = r.json()
+        bindings = res_data.get("results", {}).get("bindings", [])
+        
+        for b in bindings:
+            source_label = b["itemLabel"]["value"]
+            prop_label = b["propLabel"]["value"]
+            target_label = b["targetLabel"]["value"]
+            target_desc = b.get("targetDescription", {}).get("value", f"A Wikidata concept related to {target_label}.")
+            
+            edges.append((source_label, target_label, prop_label))
+            node_descriptions[target_label] = target_desc
+            
+    except Exception as e:
+        print(f"Error in Wikidata Hop 2 SPARQL query: {e}")
+
+    # Sanitize labels: remove URIs, strip whitespace, remove duplicates
+    sanitized_edges = []
+    seen_edges = set()
+    for src, tgt, rel in edges:
+        # Simple cleanup
+        src_clean = src.replace("http://www.wikidata.org/entity/", "").strip()
+        tgt_clean = tgt.replace("http://www.wikidata.org/entity/", "").strip()
+        rel_clean = rel.replace("http://www.wikidata.org/prop/direct/", "").strip()
+        
+        if (src_clean, tgt_clean) not in seen_edges and src_clean != tgt_clean:
+            seen_edges.add((src_clean, tgt_clean))
+            sanitized_edges.append((src_clean, tgt_clean, rel_clean))
+            
+    return sanitized_edges, node_descriptions
+
+def ingest_horizon_data(seed_keyword, db_path="curiosity.db"):
     """
-    if progress_callback:
-        progress_callback(10, "Extracting core topic synapses: Locating seed node links...")
-
-    # Hop 1
-    hop1_links = get_section0_links(seed_node)
-    seen = {seed_node.lower()}
-    pool = [seed_node]
+    Fetches Wikidata 2-hop edges and ingests them into the SQLite database.
+    Wipes existing context for this seed_keyword workspace.
+    """
+    edges, node_descriptions = fetch_wikidata_2hop(seed_keyword)
+    if not edges:
+        return 0
     
-    unique_hop1 = []
-    for link in hop1_links:
-        if link.lower() not in seen:
-            seen.add(link.lower())
-            unique_hop1.append(link)
-            pool.append(link)
-            
-    if not unique_hop1:
-        unique_hop1 = [seed_node]
-        
-    hop1_subset = unique_hop1[:limit_hop1]
-    total_hop2_tasks = len(hop1_subset)
+    # Identify the actual normalized seed label to clear the correct workspace
+    # Or just use the original seed_keyword as the workspace realm name
+    workspace_realm = seed_keyword
     
-    if progress_callback:
-        progress_callback(33, f"Weaving alternative conceptual paths: Expanded {total_hop2_tasks} source nodes...")
-
-    # Hop 2 - Fetch in parallel using ThreadPool (throttled to prevent rate limits)
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        hop2_results = list(executor.map(get_section0_links, hop1_subset))
-        
-    for links in hop2_results:
-        for link in links:
-            if link.lower() not in seen:
-                seen.add(link.lower())
-                pool.append(link)
-                
-    # Keep only first 80 nodes to guarantee fast API responses and prevent rate limits
-    pool = pool[:80]
-    
-    if progress_callback:
-        progress_callback(66, f"Stabilizing the puzzle matrix: Processing intro relationships for {len(pool)} topics...")
-
-    # Fetch summaries in batches of 20 (fast)
-    summaries = {}
-    batch_size = 20
-    for i in range(0, len(pool), batch_size):
-        batch = pool[i:i+batch_size]
-        batch_str = "|".join(batch)
-        extract_params = {
-            "action": "query",
-            "prop": "extracts",
-            "exintro": 1,
-            "explaintext": 1,
-            "titles": batch_str,
-            "format": "json"
-        }
-        try:
-            ext_data = fetch_json(WIKI_API_URL, extract_params)
-            if "query" in ext_data and "pages" in ext_data["query"]:
-                for page_id, page_info in ext_data["query"]["pages"].items():
-                    title = page_info.get("title")
-                    extract = page_info.get("extract", "")
-                    if title:
-                        if extract:
-                            summaries[title] = extract[:250] + "..." if len(extract) > 250 else extract
-                        else:
-                            summaries[title] = f"A Wikipedia article about {title}."
-        except Exception:
-            pass
-
-    # Fetch introductory links for ALL pages in the pool in parallel using ThreadPool (extremely fast!)
-    if progress_callback:
-        progress_callback(80, "Stabilizing the puzzle matrix: Constructing directed graph links...")
-        
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        all_links_results = list(executor.map(get_section0_links, pool))
-        
-    outbound_links = {}
-    for title, links in zip(pool, all_links_results):
-        outbound_links[title] = links
-
-    # Build NetworkX graph
-    G = nx.DiGraph()
-    for title in pool:
-        G.add_node(title)
-        
-    pool_set_lower = {title.lower(): title for title in pool}
-    for source, links in outbound_links.items():
-        for link in links:
-            if link.lower() in pool_set_lower and source.lower() != link.lower():
-                target = pool_set_lower[link.lower()]
-                G.add_edge(source, target, weight=1.0)
-                
-    # Iterative pruning to filter isolated nodes (degree < 2)
-    changed = True
-    while changed:
-        changed = False
-        to_remove = [node for node in G.nodes() if G.in_degree(node) + G.out_degree(node) < 2]
-        if to_remove:
-            G.remove_nodes_from(to_remove)
-            changed = True
-            
-    # Iterative pruning to remove dead ends / sources, but keep at least 40 nodes
-    changed = True
-    while changed and G.number_of_nodes() > 50:
-        changed = False
-        to_remove = []
-        for node in G.nodes():
-            if G.in_degree(node) == 0 or G.out_degree(node) == 0:
-                to_remove.append(node)
-        if to_remove:
-            if G.number_of_nodes() - len(to_remove) >= 40:
-                G.remove_nodes_from(to_remove)
-                changed = True
-            else:
-                break
-                
-    # Reinforce connectivity with a circular cycle chain
-    remaining = list(G.nodes())
-    if len(remaining) > 1:
-        for i in range(len(remaining)):
-            src = remaining[i]
-            tgt = remaining[(i + 1) % len(remaining)]
-            G.add_edge(src, tgt, weight=1.2)
-            
-    # Compile results
-    final_nodes = []
-    for title in G.nodes():
-        summary = summaries.get(title, f"A Wikipedia article about {title}.")
-        final_nodes.append((title, summary))
-        
-    final_edges = []
-    for u, v in G.edges():
-        weight = G[u][v].get('weight', 1.0)
-        final_edges.append((u, v, weight))
-        
-    if progress_callback:
-        progress_callback(100, f"Stabilizing the puzzle matrix: Realm created with {len(final_nodes)} nodes and {len(final_edges)} edges!")
-        
-    return final_nodes, final_edges
-
-def save_realm_to_db(realm_name, nodes, edges, db_path="curiosity.db"):
-    """Saves harvested nodes and edges into the database under the realm name."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # 1. Insert nodes
-    nodes_data = [(title, summary, realm_name) for title, summary in nodes]
-    cursor.executemany("INSERT OR REPLACE INTO nodes (title, summary, realm) VALUES (?, ?, ?)", nodes_data)
+    # 1. Clear stale cache for this specific workspace
+    cursor.execute("""
+        DELETE FROM edges 
+        WHERE source IN (SELECT title FROM nodes WHERE realm = ?) 
+           OR target IN (SELECT title FROM nodes WHERE realm = ?)
+    """, (workspace_realm, workspace_realm))
     
-    # 2. Insert edges
-    edges_data = []
-    for edge in edges:
-        if len(edge) == 3:
-            src, tgt, w = edge
-        else:
-            src, tgt = edge
-            w = 1.0
-        edges_data.append((src, tgt, w))
+    cursor.execute("DELETE FROM nodes WHERE realm = ?", (workspace_realm,))
+    
+    # 2. Insert nodes
+    nodes_batch = []
+    for title, desc in node_descriptions.items():
+        nodes_batch.append((title, desc, workspace_realm))
         
-    cursor.executemany("INSERT OR REPLACE INTO edges (source, target, weight) VALUES (?, ?, ?)", edges_data)
+    cursor.executemany("""
+        INSERT OR IGNORE INTO nodes (title, summary, realm) 
+        VALUES (?, ?, ?)
+    """, nodes_batch)
+    
+    # 3. Insert edges
+    edges_batch = []
+    for src, tgt, rel in edges:
+        edges_batch.append((src, tgt, 1.0))
+        
+    cursor.executemany("""
+        INSERT OR IGNORE INTO edges (source, target, weight) 
+        VALUES (?, ?, ?)
+    """, edges_batch)
     
     conn.commit()
     conn.close()
+    
+    return len(edges)

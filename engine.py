@@ -145,4 +145,84 @@ class CuriosityEngine:
                     used_nodes.add(n)
                 scored_paths.pop(best_idx)
 
+        # ─── B2B Data Science Telemetry Ingestion ───
+        try:
+            paths_metrics = []
+            for idx, path in enumerate(selected_paths):
+                metrics = self.evaluate_path_metrics(path)
+                paths_metrics.append({
+                    "track_index": idx + 1,
+                    "path": path,
+                    "metrics": metrics
+                })
+            self.log_session_telemetry(seed_topic, paths_metrics)
+        except Exception as e:
+            print(f"Telemetry logging error: {e}")
+
         return selected_paths
+
+    def evaluate_path_metrics(self, path):
+        """
+        Calculates Serendipity (log-inverse degree) and Bridge Factor (betweenness centrality)
+        for the intermediate nodes of the path, producing a Composite Discovery Score in [0, 1].
+        """
+        import math
+        # Extract intermediate nodes (excluding seed/start and end nodes)
+        int_nodes = path[1:-1] if len(path) > 2 else path
+        if not int_nodes:
+            int_nodes = path
+            
+        # 1. Serendipity: average log-inverse degree
+        serendipity_vals = []
+        for v in int_nodes:
+            deg = self.degrees.get(v, 0)
+            # Use log(deg + 2.0) to avoid division by zero and log of zero
+            serendipity_vals.append(1.0 / math.log(deg + 2.0))
+            
+        avg_serendipity = sum(serendipity_vals) / len(serendipity_vals) if serendipity_vals else 0.0
+        norm_serendipity = min(1.0, avg_serendipity / 1.5)  # Scale to [0, 1]
+        
+        # 2. Bridge Factor: average betweenness centrality
+        bridge_vals = [self.betweenness.get(v, 0.0) for v in int_nodes]
+        avg_bridge = sum(bridge_vals) / len(bridge_vals) if bridge_vals else 0.0
+        norm_bridge = min(1.0, avg_bridge * 5.0)  # Scale typical small centralities up
+        
+        # 3. Composite Discovery Score
+        composite_score = (norm_serendipity * 0.5) + (norm_bridge * 0.5)
+        
+        return {
+            "serendipity": avg_serendipity,
+            "bridge_factor": avg_bridge,
+            "composite_score": composite_score
+        }
+
+    def log_session_telemetry(self, seed_topic, paths_metrics):
+        """Logs execution metrics to a local JSON file for session analysis."""
+        import json
+        import os
+        from datetime import datetime
+        
+        log_file = "telemetry_logs.json"
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "seed_topic": seed_topic,
+            "realm": self.realm,
+            "tracks": paths_metrics
+        }
+        
+        data = []
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r") as f:
+                     data = json.load(f)
+            except Exception:
+                 data = []
+                 
+        data.append(log_entry)
+        
+        try:
+             with open(log_file, "w") as f:
+                 json.dump(data, f, indent=2)
+        except Exception as e:
+             print(f"Error logging telemetry to file: {e}")
+
