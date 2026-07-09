@@ -1,4 +1,4 @@
-# 🌐 SynapseHorizon: Graph-Driven Semantic Knowledge Discovery Engine
+# 🌐 Discovery Graph: Graph-Driven Semantic Knowledge Discovery Engine
 
 A high-performance semantic pathfinding and graph-based knowledge discovery platform that uncovers non-obvious relationships between distinct domains of human knowledge. The application crawls semantic assertions from the live Wikidata SPARQL endpoint, indexes them in a local SQLite relational cache, constructs directed topology networks using NetworkX, and performs multi-path topological ranking to isolate structural bridge concepts.
 
