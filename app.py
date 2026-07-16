@@ -1,13 +1,14 @@
 import streamlit as st
 import time
 import sqlite3
-from database import initialize_db, seed_mock_data
+import os
+from database import initialize_db
 from engine import CuriosityEngine
-from pipeline import ingest_horizon_data
+from pipeline import ingest_codebase
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SynapseHorizon: Research & Innovation Engine",
+    page_title="SynapseHorizon: Codebase Architecture Engine",
     page_icon="🌐",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -15,42 +16,16 @@ st.set_page_config(
 
 # ─── Database Init ───────────────────────────────────────────────────────────────
 initialize_db()
-try:
-    conn = sqlite3.connect("curiosity.db")
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(nodes)")
-    columns = [col[1] for col in cursor.fetchall()]
-    has_realm_col = "realm" in columns
-    if has_realm_col:
-        cursor.execute("SELECT COUNT(*) FROM nodes WHERE title = 'Atari'")
-        has_multi_realm = cursor.fetchone()[0] > 0
-    else:
-        has_multi_realm = False
-    conn.close()
-except Exception:
-    has_multi_realm = False
-
-if not has_multi_realm:
-    seed_mock_data(force=True)
-else:
-    seed_mock_data()
 
 # ─── Helper Functions ────────────────────────────────────────────────────────────
 
 def get_path_summary(path):
-    """Returns a professional, one-sentence B2B summary of the path's common thread."""
-    start = path[0]
-    end = path[-1]
-    return f"This horizon traces how the foundational mechanisms of '{start}' propagate through structural linkages to enable the application vector of '{end}'."
+    """Returns a professional, one-sentence summary of the codebase pathway connection."""
+    start = path[0].split(".")[-1]
+    end = path[-1].split(".")[-1]
+    return f"Traces how control flow or dependencies propagate from '{start}' through structural intermediate modules to reach '{end}'."
 
-def make_progress_callback(progress_bar, status_text):
-    def callback(percent, msg):
-        progress_bar.progress(percent)
-        stage_num = 1 if percent < 33 else (2 if percent < 66 else 3)
-        status_text.markdown(f"**Stage {stage_num}/3:** {msg}")
-    return callback
-
-# ─── Global B2B UI Styling CSS ──────────────────────────────────────────────────
+# ─── Global UI Styling CSS ──────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700&display=swap');
@@ -204,41 +179,43 @@ button[data-baseweb="tab"][aria-selected="true"] {
 # ════════════════════════════════════════════════════════════════════════════════
 if "selected_realm" not in st.session_state:
     st.markdown('<div class="main-title">🌐 SynapseHorizon</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subtitle">B2B Graph-Driven Research & Innovation Engine</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">Graph-Based Codebase Architecture understanding Engine</div>', unsafe_allow_html=True)
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        st.info("**1. Harvest Knowledge Nodes**\nConstruct a comprehensive local research graph using high-speed Wikipedia scraping.")
+        st.info("**1. Parse Source Code AST**\nExtract class/method definitions, inheritances, modules, and call graphs directly from directories.")
     with col_b:
-        st.info("**2. Topological Horizon Mapping**\nMap multi-hop conceptual chains using inverse connectivity penalties.")
+        st.info("**2. Topological Subsystem Mapping**\nIdentify critical bridge modules and trace diverse control paths while filtering generic helper utilities.")
     with col_c:
-        st.info("**3. Deep-Dive Innovation Briefs**\nInspect core mechanisms, cross-over applications, and innovation questions.")
+        st.info("**3. Interactive Code Metrics**\nBenchmark architectural serendipity, bottleneck centralities, and review refactoring questions.")
 
     st.markdown("---")
 
     left, middle, right = st.columns([1, 2, 1])
     with middle:
-        st.markdown("### 📥 Build Research Sub-Graph")
-        st.markdown("<p style='color:#64748b; font-size:0.9rem; margin-bottom:8px;'>Enter a topic seed to crawl and index a new sub-graph database.</p>", unsafe_allow_html=True)
+        st.markdown("### 📥 Index Codebase Repository")
+        st.markdown("<p style='color:#64748b; font-size:0.9rem; margin-bottom:8px;'>Enter a local Python directory path to parse AST nodes.</p>", unsafe_allow_html=True)
+        
+        default_dir = os.getcwd()
         custom_topic = st.text_input(
-            "Topic Core",
+            "Repository Path",
+            value=default_dir,
             key="custom_realm_input_welcome",
-            placeholder="e.g. Artificial Intelligence, Cryptography, Blockchain, Astrophysics...",
             label_visibility="collapsed"
         )
         if st.button("🔌 Construct Graph Database", key="btn_manifest_welcome", use_container_width=True):
-            if custom_topic.strip():
-                with st.spinner("Querying Wikidata Semantic Graph Network..."):
-                    count = ingest_horizon_data(custom_topic, db_path="curiosity.db")
+            if custom_topic.strip() and os.path.exists(custom_topic.strip()):
+                with st.spinner("Analyzing codebase directory & generating AST sub-graph..."):
+                    count = ingest_codebase(custom_topic.strip(), db_path="curiosity.db")
                     if count > 0:
-                        st.session_state.selected_realm = custom_topic
-                        st.success(f"Graph constructed successfully for '{custom_topic}' with {count} relationships. Loading workspace...")
+                        st.session_state.selected_realm = custom_topic.strip()
+                        st.success(f"Codebase parsed successfully! Indexed {count} call graph edges. Loading workspace...")
                         time.sleep(0.8)
                         st.rerun()
                     else:
-                        st.error("No Wikidata concepts found for the seed topic. Try another search term.")
+                        st.error("No Python source files found or no call edges extracted. Verify repository content.")
             else:
-                st.warning("Please type a topic core.")
+                st.error("Repository directory path does not exist. Please enter a valid directory.")
 
         # Saved realms
         try:
@@ -252,9 +229,9 @@ if "selected_realm" not in st.session_state:
 
         if saved_realms:
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("**📂 Existing Graph Databases**")
+            st.markdown("**📂 Previously Loaded Codebases**")
             for r in saved_realms:
-                if st.button(f"🔎 Inspect Database: {r}", key=f"jump_{r}", use_container_width=True):
+                if st.button(f"🔎 Inspect: {r}", key=f"jump_{r}", use_container_width=True):
                     st.session_state.selected_realm = r
                     st.rerun()
 
@@ -283,58 +260,56 @@ c_left, c_center, c_right = st.columns([1, 2, 2])
 # ─── LEFT COLUMN: Configurator ──────────────────────────────────────────────────
 with c_left:
     st.markdown('<div class="workspace-col-title">⚙️ Discovery Control</div>', unsafe_allow_html=True)
-    st.markdown(f"**Current Database:** `{st.session_state.selected_realm}`")
+    st.markdown(f"**Codebase Folder:** `{st.session_state.selected_realm}`")
     
     # Input for Seed Topic
-    seed_input = st.text_input(
-        "Core Seed Topic",
-        value=st.session_state.seed_topic,
-        help="Specify the starting topic node to branch out discovery pathways from."
-    )
-    
+    if all_nodes:
+        seed_input = st.selectbox(
+            "Core Seed Component",
+            options=all_nodes,
+            index=all_nodes.index(st.session_state.seed_topic) if st.session_state.seed_topic in all_nodes else 0,
+            help="Select the starting module, class, or method to trace architectural paths from."
+        )
+    else:
+        seed_input = st.text_input("Core Seed Component", value="")
+
     # Slider for Innovation Horizon Width (1 to 5 tracks)
     width_val = st.slider(
-        "Innovation Horizon Width",
+        "Discovery Path Tracks",
         min_value=1,
         max_value=5,
         value=4,
-        help="The number of alternative path tracks to extract."
+        help="The maximum number of distinct architectural paths to extract."
     )
     
     # Execute button
     st.markdown('<div class="b2b-btn">', unsafe_allow_html=True)
-    if st.button("⚡ Execute Discovery", use_container_width=True):
-        # Validate node
-        matched = None
-        for n in all_nodes:
-            if n.lower() == seed_input.strip().lower():
-                matched = n
-                break
-        if matched:
-            st.session_state.seed_topic = matched
+    if st.button("⚡ Discover Execution Paths", use_container_width=True):
+        if seed_input in all_nodes:
+            st.session_state.seed_topic = seed_input
             st.session_state.selected_path = None
             st.rerun()
         else:
-            st.error(f"'{seed_input}' not found in active graph. Search terms are case-sensitive.")
+            st.error("Selected seed component is invalid.")
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # Sync with Wikidata button
+    # Rescan codebase button
     st.markdown('<div class="b2b-btn" style="margin-top: 8px;">', unsafe_allow_html=True)
-    if st.button("🌐 Sync with Wikidata Core", use_container_width=True):
-        with st.spinner("Querying Wikidata Semantic Graph Network..."):
-            count = ingest_horizon_data(st.session_state.selected_realm, db_path="curiosity.db")
+    if st.button("🔄 Rescan Repository Directory", use_container_width=True):
+        with st.spinner("Re-parsing source files & rebuilding call graph..."):
+            count = ingest_codebase(st.session_state.selected_realm, db_path="curiosity.db")
             if count > 0:
-                st.toast(f"🚀 Ingestion complete! Synced {count} premium structured relationships into local graph.")
+                st.toast(f"🚀 Rescan complete! Refreshed {count} relationships.")
                 time.sleep(1.0)
                 st.rerun()
             else:
-                st.error("Failed to query Wikidata. Please verify your internet connection or seed name.")
+                st.error("Rescan failed. Check folder files.")
     st.markdown('</div>', unsafe_allow_html=True)
     
     st.markdown("---")
     
     # Switch realm options
-    st.markdown("**📂 Switch Sub-Graph**")
+    st.markdown("**📂 Switch Codebase**")
     try:
         conn = sqlite3.connect("curiosity.db")
         cursor = conn.cursor()
@@ -346,13 +321,13 @@ with c_left:
         
     for r in saved_realms:
         if r != st.session_state.selected_realm:
-            if st.button(f"📁 {r}", key=f"switch_r_{r}", use_container_width=True):
+            if st.button(f"📁 {os.path.basename(r)}", key=f"switch_r_{r}", use_container_width=True, help=r):
                 st.session_state.selected_realm = r
                 st.session_state.pop("seed_topic", None)
                 st.session_state.pop("selected_path", None)
                 st.rerun()
                 
-    if st.button("➕ Construct New Graph", use_container_width=True):
+    if st.button("➕ Parse New Codebase", use_container_width=True):
         st.session_state.pop("selected_realm", None)
         st.session_state.pop("seed_topic", None)
         st.session_state.pop("selected_path", None)
@@ -361,8 +336,8 @@ with c_left:
 
 # ─── CENTER COLUMN: Discovery Tracks ────────────────────────────────────────────
 with c_center:
-    st.markdown('<div class="workspace-col-title">🛣️ Discovery Horizons</div>', unsafe_allow_html=True)
-    st.markdown(f"Displaying tracks branching out from **'{st.session_state.seed_topic}'**:")
+    st.markdown('<div class="workspace-col-title">🛣️ Architectural Pathways</div>', unsafe_allow_html=True)
+    st.markdown(f"Displaying tracks tracing out from **'{st.session_state.seed_topic}'**:")
     
     discovery_paths = engine.generate_discovery_horizons(
         seed_topic=st.session_state.seed_topic,
@@ -372,8 +347,8 @@ with c_center:
     )
     
     if not discovery_paths:
-        st.warning("No discovery pathways found starting at this topic node. Set another topic core or depth.")
-        st.info(f"Available node suggestions: {', '.join(all_nodes[:10])}...")
+        st.warning("No architectural pathways found starting from this code component.")
+        st.info("Check if this node is connected to other components in the parsed graph.")
     else:
         # Default selection
         if st.session_state.selected_path is None or st.session_state.selected_path not in discovery_paths:
@@ -385,13 +360,13 @@ with c_center:
             sel_class = "horizon-selected" if is_selected else ""
             
             # Format text chains: A ➔ B ➔ C
-            chain_str = " ➔ ".join(path)
+            chain_str = " ➔ ".join([p.split(".")[-1] for p in path])
             summary_str = get_path_summary(path)
             
             # Styled container card
             st.markdown(f"""
             <div class="horizon-container {sel_class}">
-                <div class="horizon-chain-text">🧬 Track {idx+1}: {chain_str}</div>
+                <div class="horizon-chain-text">🧬 Path Track {idx+1}: {chain_str}</div>
                 <div class="horizon-summary-text">{summary_str}</div>
             </div>
             """, unsafe_allow_html=True)
@@ -403,29 +378,33 @@ with c_center:
                 st.rerun()
 
 
-# ─── RIGHT COLUMN: Intelligence Workspace ───────────────────────────────────────
+# ─── RIGHT COLUMN: Component Workspace ──────────────────────────────────────────
 with c_right:
-    st.markdown('<div class="workspace-col-title">📋 Intelligence Workspace</div>', unsafe_allow_html=True)
+    st.markdown('<div class="workspace-col-title">📋 Architectural Workspace</div>', unsafe_allow_html=True)
     
     if st.session_state.selected_path:
         path = st.session_state.selected_path
-        st.markdown(f"### 🧪 Innovation Horizon Brief")
-        st.markdown(f"Active Track: **{' ➔ '.join(path)}**")
+        st.markdown(f"### 🧪 Execution Path Brief")
+        
+        # Display full path
+        st.markdown(f"Active Track: **{' ➔ '.join([p.split('.')[-1] for p in path])}**")
         
         # Tabs for every node in the selected path
-        node_tabs = st.tabs([node for node in path])
+        node_tabs = st.tabs([node.split(".")[-1] for node in path])
         for idx, node in enumerate(path):
             with node_tabs[idx]:
                 profile = engine.node_summaries.get(node, {})
-                st.markdown(f'<div class="profile-title">🔍 {node} Research Profile</div>', unsafe_allow_html=True)
+                node_type = engine.node_types.get(node, "unknown")
                 
-                st.markdown('<div class="profile-section-title">⚙️ Core Mechanism</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="profile-title">🔍 {node} ({node_type})</div>', unsafe_allow_html=True)
+                
+                st.markdown('<div class="profile-section-title">⚙️ Core Mechanism & Signature</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="profile-section-body">{profile.get("core_mechanism", "Details not loaded.")}</div>', unsafe_allow_html=True)
                 
-                st.markdown('<div class="profile-section-title">🔀 Cross-Over Application</div>', unsafe_allow_html=True)
+                st.markdown('<div class="profile-section-title">🔀 Dependency Coupling Context</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="profile-section-body">{profile.get("cross_over_application", "Details not loaded.")}</div>', unsafe_allow_html=True)
                 
-                st.markdown('<div class="profile-section-title">💡 Open Innovation Question</div>', unsafe_allow_html=True)
+                st.markdown('<div class="profile-section-title">💡 Architectural / Refactoring Question</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="profile-section-body">{profile.get("open_innovation_question", "Details not loaded.")}</div>', unsafe_allow_html=True)
                 
         # ─── Algorithmic Path Evaluation ───
@@ -439,13 +418,13 @@ with c_right:
             st.metric(
                 label="Serendipity Index", 
                 value=f"{metrics['serendipity']:.2f}",
-                help="Measures average log-inverse degree. High values indicate discovery pathways that traverse niche, less-connected nodes."
+                help="Measures average log-inverse degree. High values indicate discovery pathways that traverse specialized, low-degree leaf nodes (specific code logics) rather than generic hubs."
             )
         with col_m2:
             st.metric(
                 label="Bridge Centrality", 
                 value=f"{metrics['bridge_factor']:.4f}",
-                help="Measures average betweenness centrality. High values indicate intermediate nodes that cross-link distinct topical clusters."
+                help="Measures average betweenness centrality. High values indicate intermediate components that cross-link distinct architectural subsystems."
             )
         with col_m3:
             comp = metrics['composite_score']
@@ -461,14 +440,14 @@ with c_right:
                 label="Composite Score", 
                 value=f"{comp * 100:.1f}%",
                 delta=label,
-                help="Normalized discovery index balancing serendipity and bridge bottleneck centrality."
+                help="Normalized architectural understanding index balancing serendipity and bottleneck centrality."
             )
             
         st.info(
             "💡 **Topological Benchmarking Insight:**\n\n"
-            "The **Serendipity Index** calculates the inverse log-degree to verify if this pathway leverages less-connected, niche nodes to bypass standard informational hubs. "
-            "The **Bridge Centrality** tracks how successfully the path routes through high-betweenness bottlenecks that link disparate semantic clusters. "
-            "A higher **Composite Score** indicates a pathway that maximizes obscure knowledge connections while crossing structural bottlenecks."
+            "The **Serendipity Index** calculates the inverse log-degree to verify if this pathway leverages specialized, low-degree leaf nodes to bypass standard helper/utility hubs. "
+            "The **Bridge Centrality** tracks how successfully the path routes through high-betweenness bottleneck nodes that link separate software subsystems. "
+            "A higher **Composite Score** indicates a pathway that highlights clean structural code relationships while crossing architectural boundaries."
         )
     else:
-        st.info("Select an innovation track from the center column to compile a deep-dive intelligence brief.")
+        st.info("Select an architectural path from the center column to compile a deep-dive structure brief.")

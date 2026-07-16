@@ -1,197 +1,220 @@
-import requests
-import sqlite3
-import re
+import os
+import ast
+from database import save_code_graph_to_db
 
-WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
-WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
-USER_AGENT = "SynapseHorizon/1.0 (contact@synapsehorizon.com) Python-requests/2.0"
-
-def get_wikidata_entity(label):
-    """Resolves a human label to a Wikidata Qid and normalized label."""
-    params = {
-        "action": "wbsearchentities",
-        "search": label,
-        "language": "en",
-        "format": "json"
-    }
-    headers = {"User-Agent": USER_AGENT}
-    try:
-        r = requests.get(WIKIDATA_API_URL, params=params, headers=headers, timeout=10)
-        data = r.json()
-        if data.get("search"):
-            # Return Qid, normalized label, and description
-            first_match = data["search"][0]
-            return first_match["id"], first_match["label"], first_match.get("description", "A semantic Wikidata concept.")
-    except Exception as e:
-        print(f"Error searching Wikidata entity: {e}")
-    return None, None, None
-
-def fetch_wikidata_2hop(seed_keyword):
-    """
-    Queries Wikidata via SPARQL to construct a 2-hop semantic network.
-    Returns:
-      edges: list of tuples (source_label, target_label, relationship_type)
-      node_descriptions: dict mapping node_label -> description
-    """
-    qid, seed_label, seed_desc = get_wikidata_entity(seed_keyword)
-    if not qid:
-        return [], {}
-    
-    node_descriptions = {seed_label: seed_desc}
-    edges = []
-    
-    # ─── Hop 1 Query ───
-    # Find all direct claims from the seed entity
-    hop1_query = f"""
-    SELECT ?propLabel ?targetLabel ?target ?targetDescription WHERE {{
-      VALUES ?item {{ wd:{qid} }}
-      ?item ?p ?target .
-      ?property wikibase:directClaim ?p .
-      ?property rdfs:label ?propLabel .
-      FILTER(LANG(?propLabel) = "en") .
-      ?target rdfs:label ?targetLabel .
-      FILTER(LANG(?targetLabel) = "en") .
-      OPTIONAL {{
-        ?target schema:description ?targetDescription .
-        FILTER(LANG(?targetDescription) = "en") .
-      }}
-    }} LIMIT 50
-    """
-    
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/sparql-results+json"
-    }
-    
-    target_qids = []
-    try:
-        r = requests.get(WIKIDATA_SPARQL_URL, params={"query": hop1_query, "format": "json"}, headers=headers, timeout=15)
-        res_data = r.json()
-        bindings = res_data.get("results", {}).get("bindings", [])
+class CodeASTVisitor(ast.NodeVisitor):
+    def __init__(self, module_name):
+        self.module_name = module_name
+        self.current_class = None
+        self.current_function = None
         
-        for b in bindings:
-            prop_label = b["propLabel"]["value"]
-            target_label = b["targetLabel"]["value"]
-            target_url = b["target"]["value"]
-            target_desc = b.get("targetDescription", {}).get("value", f"A Wikidata concept related to {target_label}.")
+        self.nodes = [] # List of dicts: {"title": ..., "summary": ..., "node_type": ...}
+        self.edges = [] # List of dicts: {"source": ..., "target": ..., "edge_type": ...}
+        
+        # Local imports mapping name -> fully_qualified_target
+        self.imports = {}
+        
+    def visit_Import(self, node):
+        for alias in node.names:
+            name = alias.asname or alias.name
+            self.imports[name] = alias.name
+            self.edges.append({
+                "source": self.module_name,
+                "target": alias.name,
+                "edge_type": "imports"
+            })
+        self.generic_visit(node)
+        
+    def visit_ImportFrom(self, node):
+        module = node.module or ""
+        for alias in node.names:
+            name = alias.asname or alias.name
+            target = f"{module}.{alias.name}" if module else alias.name
+            self.imports[name] = target
+            self.edges.append({
+                "source": self.module_name,
+                "target": target,
+                "edge_type": "imports"
+            })
+        self.generic_visit(node)
+        
+    def visit_ClassDef(self, node):
+        class_name = f"{self.module_name}.{node.name}"
+        bases = []
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                bases.append(base.id)
+            elif isinstance(base, ast.Attribute):
+                if isinstance(base.value, ast.Name):
+                    bases.append(f"{base.value.id}.{base.attr}")
+        
+        summary = f"class {node.name}(" + ", ".join(bases) + "):"
+        self.nodes.append({
+            "title": class_name,
+            "summary": summary,
+            "node_type": "class"
+        })
+        
+        self.edges.append({
+            "source": self.module_name,
+            "target": class_name,
+            "edge_type": "contains"
+        })
+        
+        for base in bases:
+            resolved_base = self.imports.get(base, base)
+            self.edges.append({
+                "source": class_name,
+                "target": resolved_base,
+                "edge_type": "inherits"
+            })
             
-            # Extract Qid from URL
-            m = re.search(r"Q\d+", target_url)
-            if m:
-                target_qid = m.group(0)
-                target_qids.append(target_qid)
+        old_class = self.current_class
+        self.current_class = class_name
+        self.generic_visit(node)
+        self.current_class = old_class
+        
+    def visit_FunctionDef(self, node):
+        self.visit_any_function(node)
+        
+    def visit_AsyncFunctionDef(self, node):
+        self.visit_any_function(node)
+        
+    def visit_any_function(self, node):
+        if self.current_class:
+            func_name = f"{self.current_class}.{node.name}"
+            node_type = "method"
+        else:
+            func_name = f"{self.module_name}.{node.name}"
+            node_type = "function"
+            
+        args_list = [arg.arg for arg in node.args.args]
+        summary = f"def {node.name}(" + ", ".join(args_list) + "):"
+        
+        self.nodes.append({
+            "title": func_name,
+            "summary": summary,
+            "node_type": node_type
+        })
+        
+        parent = self.current_class or self.module_name
+        self.edges.append({
+            "source": parent,
+            "target": func_name,
+            "edge_type": "contains"
+        })
+        
+        old_func = self.current_function
+        self.current_function = func_name
+        self.generic_visit(node)
+        self.current_function = old_func
+        
+    def visit_Call(self, node):
+        if not self.current_function:
+            self.generic_visit(node)
+            return
+            
+        called_name = None
+        if isinstance(node.func, ast.Name):
+            called_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name):
+                called_name = f"{node.func.value.id}.{node.func.attr}"
                 
-            edges.append((seed_label, target_label, prop_label))
-            node_descriptions[target_label] = target_desc
-            
-    except Exception as e:
-        print(f"Error in Wikidata Hop 1 SPARQL query: {e}")
-        return [], {}
-
-    if not target_qids:
-        return edges, node_descriptions
-
-    # ─── Hop 2 Query ───
-    # Batch query top 12 targets to get Hop 2 connections
-    batch_qids = target_qids[:12]
-    values_clause = " ".join([f"wd:{q}" for q in batch_qids])
-    
-    hop2_query = f"""
-    SELECT ?itemLabel ?propLabel ?targetLabel ?targetDescription WHERE {{
-      VALUES ?item {{ {values_clause} }}
-      ?item ?p ?target .
-      ?property wikibase:directClaim ?p .
-      ?property rdfs:label ?propLabel .
-      FILTER(LANG(?propLabel) = "en") .
-      ?target rdfs:label ?targetLabel .
-      FILTER(LANG(?targetLabel) = "en") .
-      OPTIONAL {{
-        ?target schema:description ?targetDescription .
-        FILTER(LANG(?targetDescription) = "en") .
-      }}
-      ?item rdfs:label ?itemLabel .
-      FILTER(LANG(?itemLabel) = "en") .
-    }} LIMIT 100
-    """
-    
-    try:
-        r = requests.get(WIKIDATA_SPARQL_URL, params={"query": hop2_query, "format": "json"}, headers=headers, timeout=15)
-        res_data = r.json()
-        bindings = res_data.get("results", {}).get("bindings", [])
+        if called_name:
+            resolved = self.resolve_call(called_name)
+            if resolved:
+                self.edges.append({
+                    "source": self.current_function,
+                    "target": resolved,
+                    "edge_type": "calls"
+                })
+                
+        self.generic_visit(node)
         
-        for b in bindings:
-            source_label = b["itemLabel"]["value"]
-            prop_label = b["propLabel"]["value"]
-            target_label = b["targetLabel"]["value"]
-            target_desc = b.get("targetDescription", {}).get("value", f"A Wikidata concept related to {target_label}.")
+    def resolve_call(self, name):
+        if name in self.imports:
+            return self.imports[name]
+        parts = name.split(".")
+        if parts[0] in self.imports:
+            resolved_module = self.imports[parts[0]]
+            return f"{resolved_module}.{'.'.join(parts[1:])}"
             
-            edges.append((source_label, target_label, prop_label))
-            node_descriptions[target_label] = target_desc
+        if name.startswith("self.") and self.current_class:
+            method_name = name.split(".")[1]
+            return f"{self.current_class}.{method_name}"
             
-    except Exception as e:
-        print(f"Error in Wikidata Hop 2 SPARQL query: {e}")
+        if "." in name:
+            return name
+            
+        return f"{self.module_name}.{name}"
 
-    # Sanitize labels: remove URIs, strip whitespace, remove duplicates
-    sanitized_edges = []
-    seen_edges = set()
-    for src, tgt, rel in edges:
-        # Simple cleanup
-        src_clean = src.replace("http://www.wikidata.org/entity/", "").strip()
-        tgt_clean = tgt.replace("http://www.wikidata.org/entity/", "").strip()
-        rel_clean = rel.replace("http://www.wikidata.org/prop/direct/", "").strip()
+def parse_repository(root_dir):
+    """
+    Traverses the codebase directory, extracts module/class/function/method nodes,
+    constructs static containment/inheritance/call edges, and ignores config/temp directories.
+    """
+    all_nodes = []
+    all_edges = []
+    
+    exclude_dirs = {".git", "__pycache__", "venv", ".venv", "env", ".agents", "scratch"}
+    
+    for root, dirs, files in os.walk(root_dir):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        for file in files:
+            if file.endswith(".py"):
+                file_path = os.path.join(root, file)
+                
+                rel_path = os.path.relpath(file_path, root_dir)
+                module_parts = rel_path[:-3].replace(os.sep, ".").split(".")
+                if module_parts[-1] == "__init__":
+                    module_parts.pop()
+                module_name = ".".join(module_parts)
+                if not module_name:
+                    module_name = file[:-3]
+                    
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        source = f.read()
+                    
+                    all_nodes.append({
+                        "title": module_name,
+                        "summary": f"module {file}",
+                        "node_type": "module"
+                    })
+                    
+                    tree = ast.parse(source, filename=file_path)
+                    visitor = CodeASTVisitor(module_name)
+                    visitor.visit(tree)
+                    
+                    all_nodes.extend(visitor.nodes)
+                    all_edges.extend(visitor.edges)
+                except Exception as e:
+                    print(f"Error parsing {file_path}: {e}")
+                    
+    # Generate nodes for unresolved calls/imports (mark as external)
+    local_titles = {node["title"] for node in all_nodes}
+    external_nodes = set()
+    for edge in all_edges:
+        target = edge["target"]
+        if target not in local_titles:
+            external_nodes.add(target)
+            
+    for ext in external_nodes:
+        if ext.startswith("self."):
+            continue
+        all_nodes.append({
+            "title": ext,
+            "summary": f"External dependency or library import",
+            "node_type": "external"
+        })
         
-        if (src_clean, tgt_clean) not in seen_edges and src_clean != tgt_clean:
-            seen_edges.add((src_clean, tgt_clean))
-            sanitized_edges.append((src_clean, tgt_clean, rel_clean))
-            
-    return sanitized_edges, node_descriptions
+    return all_nodes, all_edges
 
-def ingest_horizon_data(seed_keyword, db_path="curiosity.db"):
-    """
-    Fetches Wikidata 2-hop edges and ingests them into the SQLite database.
-    Wipes existing context for this seed_keyword workspace.
-    """
-    edges, node_descriptions = fetch_wikidata_2hop(seed_keyword)
-    if not edges:
+def ingest_codebase(repo_path, db_path="curiosity.db"):
+    """Parses a local codebase and commits the structural graph database to SQLite."""
+    nodes, edges = parse_repository(repo_path)
+    if not nodes:
         return 0
-    
-    # Identify the actual normalized seed label to clear the correct workspace
-    # Or just use the original seed_keyword as the workspace realm name
-    workspace_realm = seed_keyword
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # 1. Clear stale cache for this specific workspace
-    cursor.execute("""
-        DELETE FROM edges 
-        WHERE source IN (SELECT title FROM nodes WHERE realm = ?) 
-           OR target IN (SELECT title FROM nodes WHERE realm = ?)
-    """, (workspace_realm, workspace_realm))
-    
-    cursor.execute("DELETE FROM nodes WHERE realm = ?", (workspace_realm,))
-    
-    # 2. Insert nodes
-    nodes_batch = []
-    for title, desc in node_descriptions.items():
-        nodes_batch.append((title, desc, workspace_realm))
-        
-    cursor.executemany("""
-        INSERT OR IGNORE INTO nodes (title, summary, realm) 
-        VALUES (?, ?, ?)
-    """, nodes_batch)
-    
-    # 3. Insert edges
-    edges_batch = []
-    for src, tgt, rel in edges:
-        edges_batch.append((src, tgt, 1.0))
-        
-    cursor.executemany("""
-        INSERT OR IGNORE INTO edges (source, target, weight) 
-        VALUES (?, ?, ?)
-    """, edges_batch)
-    
-    conn.commit()
-    conn.close()
-    
+    save_code_graph_to_db(repo_path, nodes, edges, db_path)
     return len(edges)

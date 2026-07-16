@@ -7,6 +7,7 @@ class CuriosityEngine:
         self.realm = realm
         self.graph = nx.DiGraph()
         self.node_summaries = {}
+        self.node_types = {}
         
         # Topological metrics
         self.degrees = {}
@@ -15,31 +16,25 @@ class CuriosityEngine:
         
         self.load_graph()
 
-    def enrich_node_profile(self, title, summary):
-        """Generates a structured dictionary containing B2B multi-dimensional profiles from the raw summary."""
-        sentences = [s.strip() for s in summary.split(".") if s.strip()]
+    def enrich_node_profile(self, title, summary, node_type):
+        """Generates a structured dictionary containing architectural metrics and refactoring insights for the code node."""
+        deg = self.degrees.get(title, 0)
         
         # 1. Core Mechanism
-        if len(sentences) > 0:
-            core = sentences[0] + "."
+        core = f"A codebase {node_type} component. Definition/Signature: `{summary}`."
+        
+        # 2. Dependency Role & Coupling
+        if deg > 5:
+            coupling_desc = f"exhibits a high degree of coupling ({deg} connections), representing a major orchestrator or general utility module in the codebase graph."
+        elif deg > 1:
+            coupling_desc = f"maintains a moderate coupling level ({deg} connections), serving as a standard intermediate component."
         else:
-            core = f"The functional operating architecture and execution engine of {title}."
-            
-        # 2. Cross-Over Application
-        if len(sentences) > 1:
-            cross_over = f"Adapting the structural logic of {title} (such as {sentences[1].lower()}) to optimize unrelated domains like high-frequency financial modeling, digital twin city simulations, or supply chain resilience."
-        else:
-            cross_over = f"Cross-domain deployment of {title} principles to stabilize and scale decentralized machine learning nodes or telemetry networks."
-            
-        # 3. Open Innovation Question
-        if len(sentences) > 2:
-            ref_idea = sentences[2].lower()
-            if len(ref_idea) > 100:
-                ref_idea = ref_idea[:100] + "..."
-            question = f"How can we scale the operational constraints of {title} to bypass computational bottlenecks, particularly concerning {ref_idea}?"
-        else:
-            question = f"What security and consensus bottlenecks must be resolved to deploy the core dynamics of {title} in zero-trust, real-time edge environments?"
-            
+            coupling_desc = f"is a specialized leaf component with minimal external dependencies, focusing on localized functionality."
+        cross_over = f"This component {coupling_desc} When analyzing system flow, it functions as a target node for incoming dependency vectors."
+        
+        # 3. Architectural / Refactoring Question
+        question = f"How can we isolate this {node_type} to enable modular unit testing, and what downstream dependencies would be affected if its implementation is modified?"
+        
         return {
             "core_mechanism": core,
             "cross_over_application": cross_over,
@@ -47,11 +42,13 @@ class CuriosityEngine:
         }
 
     def load_graph(self):
-        """Loads nodes and edges from SQLite, populating the DiGraph, enriching profiles, and computing metrics."""
+        """Loads codebase nodes and edges from SQLite, populating the DiGraph and calculating topological metrics."""
         nodes, edges = fetch_graph_data(self.db_path, self.realm)
+        
+        # Temporarily store nodes to compute metrics first, then enrich profiles
         for node in nodes:
             title = node['title']
-            self.node_summaries[title] = self.enrich_node_profile(title, node['summary'])
+            self.node_types[title] = node.get('node_type', 'unknown')
             self.graph.add_node(title)
         
         for edge in edges:
@@ -67,8 +64,13 @@ class CuriosityEngine:
             self.betweenness = {}
             self.clustering = {}
 
+        # Populate node descriptions using precomputed metrics
+        for node in nodes:
+            title = node['title']
+            self.node_summaries[title] = self.enrich_node_profile(title, node['summary'], self.node_types[title])
+
     def get_critical_system_bridges(self):
-        """Identifies the top 3 nodes acting as bottlenecks in the active network."""
+        """Identifies the top 3 nodes acting as critical architectural bottlenecks in the active graph."""
         if not self.betweenness:
             return []
         sorted_nodes = sorted(self.betweenness.items(), key=lambda x: x[1], reverse=True)
@@ -76,20 +78,19 @@ class CuriosityEngine:
 
     def generate_discovery_horizons(self, seed_topic, max_depth=4, alpha=0.7, top_k=4):
         """
-        Extracts multiple diverse paths branching out from the seed node.
-        Applies a topological ranking matrix and an overlap penalty to guarantee diversity.
+        Extracts multiple diverse paths branching out from the seed code node.
+        Applies a topological ranking matrix and a greedy overlap penalty to guarantee diversity.
         """
         if seed_topic not in self.graph:
             return []
 
-        # 1. Collect all paths starting from the seed_topic up to max_depth deep
         paths = []
-        limit = 1000  # Safety threshold for dense sub-graphs
+        limit = 1000  # Safety threshold for dense graphs
         
         def dfs(node, current_path):
             if len(paths) >= limit:
                 return
-            if len(current_path) >= 3:  # Interesting paths have at least 3 nodes (2 steps)
+            if len(current_path) >= 2:  # Paths of length >= 2 (at least 1 step) are useful for codebase traversal
                 paths.append(list(current_path))
             if len(current_path) - 1 < max_depth:
                 for neighbor in self.graph.successors(node):
@@ -103,21 +104,42 @@ class CuriosityEngine:
         if not paths:
             return []
 
-        # 2. Score each path using topological ranking matrix (inverse-degree & local clustering)
+        # Score paths using the B2B Code Understanding topological ranking matrix
         def score_path(path):
             score = 0.0
             for node in path:
                 deg = self.degrees.get(node, 0)
                 clust = self.clustering.get(node, 0.0)
-                # Inverse-degree penalty combined with low-clustering coefficient boost
-                node_score = 1.0 / (((deg + 1.0) ** alpha) * (clust + 0.05))
+                between = self.betweenness.get(node, 0.0)
+                node_type = self.node_types.get(node, "unknown")
+                
+                # 1. Hub Penalty: Penalize nodes with high degree (standard degree centrality penalty)
+                hub_penalty = ((deg + 1.0) ** alpha)
+                
+                # Extra penalty for helper/utility names
+                name_lower = node.lower()
+                is_util = any(u in name_lower for u in ["util", "helper", "common", "base", "config", "sys", "os", "time"])
+                if is_util:
+                    hub_penalty *= 5.0
+                if node_type == "external":
+                    hub_penalty *= 2.0  # Encourage routing through codebase local files
+                    
+                # 2. Bridge Reward: Reward high betweenness centrality (highly connected bottlenecks)
+                bridge_reward = 1.0 + (between * 50.0)
+                
+                # 3. Information Density: Boost local classes, methods, and functions relative to external dependencies
+                type_boost = 1.2 if node_type in ["class", "method", "function"] else 0.8
+                
+                # Combined Node Score
+                node_score = (bridge_reward * type_boost) / (hub_penalty * (clust + 0.05))
                 score += node_score
+                
             return score / len(path)  # Normalize by path length
 
         scored_paths = [(p, score_path(p)) for p in paths]
         scored_paths.sort(key=lambda x: x[1], reverse=True)
 
-        # 3. Diverse selection loop with shared node penalty
+        # Diverse selection loop with shared node penalty
         selected_paths = []
         used_nodes = set()
 
@@ -145,7 +167,7 @@ class CuriosityEngine:
                     used_nodes.add(n)
                 scored_paths.pop(best_idx)
 
-        # ─── B2B Data Science Telemetry Ingestion ───
+        # ─── Data Science Telemetry Ingestion ───
         try:
             paths_metrics = []
             for idx, path in enumerate(selected_paths):
@@ -167,7 +189,6 @@ class CuriosityEngine:
         for the intermediate nodes of the path, producing a Composite Discovery Score in [0, 1].
         """
         import math
-        # Extract intermediate nodes (excluding seed/start and end nodes)
         int_nodes = path[1:-1] if len(path) > 2 else path
         if not int_nodes:
             int_nodes = path
@@ -176,7 +197,6 @@ class CuriosityEngine:
         serendipity_vals = []
         for v in int_nodes:
             deg = self.degrees.get(v, 0)
-            # Use log(deg + 2.0) to avoid division by zero and log of zero
             serendipity_vals.append(1.0 / math.log(deg + 2.0))
             
         avg_serendipity = sum(serendipity_vals) / len(serendipity_vals) if serendipity_vals else 0.0
@@ -225,4 +245,3 @@ class CuriosityEngine:
                  json.dump(data, f, indent=2)
         except Exception as e:
              print(f"Error logging telemetry to file: {e}")
-
