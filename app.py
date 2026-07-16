@@ -247,9 +247,6 @@ all_nodes = sorted(list(engine.graph.nodes()))
 default_seed = all_nodes[0] if all_nodes else ""
 
 # State setup
-if "seed_topic" not in st.session_state or st.session_state.seed_topic not in engine.graph:
-    st.session_state.seed_topic = default_seed
-
 if "selected_path" not in st.session_state:
     st.session_state.selected_path = None
 
@@ -262,12 +259,28 @@ with c_left:
     st.markdown('<div class="workspace-col-title">⚙️ Discovery Control</div>', unsafe_allow_html=True)
     st.markdown(f"**Codebase Folder:** `{st.session_state.selected_realm}`")
     
+    # Dependency Toggle Checkbox
+    include_external = st.checkbox(
+        "🔍 Include External / Built-in Calls",
+        value=False,
+        help="When disabled (default), only project-defined modules, classes, and methods are traversed. Enable this to inspect built-ins and third-party library linkages."
+    )
+    
+    # Define active nodes based on toggle
+    active_nodes = sorted(list(engine.core_graph.nodes())) if not include_external else sorted(list(engine.graph.nodes()))
+    if not active_nodes:
+        active_nodes = sorted(list(engine.graph.nodes()))
+        
+    # State setup for seed topic
+    if "seed_topic" not in st.session_state or st.session_state.seed_topic not in active_nodes:
+        st.session_state.seed_topic = active_nodes[0] if active_nodes else ""
+        
     # Input for Seed Topic
-    if all_nodes:
+    if active_nodes:
         seed_input = st.selectbox(
             "Core Seed Component",
-            options=all_nodes,
-            index=all_nodes.index(st.session_state.seed_topic) if st.session_state.seed_topic in all_nodes else 0,
+            options=active_nodes,
+            index=active_nodes.index(st.session_state.seed_topic) if st.session_state.seed_topic in active_nodes else 0,
             help="Select the starting module, class, or method to trace architectural paths from."
         )
     else:
@@ -285,7 +298,7 @@ with c_left:
     # Execute button
     st.markdown('<div class="b2b-btn">', unsafe_allow_html=True)
     if st.button("⚡ Discover Execution Paths", use_container_width=True):
-        if seed_input in all_nodes:
+        if seed_input in active_nodes:
             st.session_state.seed_topic = seed_input
             st.session_state.selected_path = None
             st.rerun()
@@ -343,7 +356,8 @@ with c_center:
         seed_topic=st.session_state.seed_topic,
         max_depth=4,
         alpha=0.7,
-        top_k=width_val
+        top_k=width_val,
+        include_external=include_external
     )
     
     if not discovery_paths:

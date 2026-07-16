@@ -6,6 +6,7 @@ class CuriosityEngine:
         self.db_path = db_path
         self.realm = realm
         self.graph = nx.DiGraph()
+        self.core_graph = nx.DiGraph()
         self.node_summaries = {}
         self.node_types = {}
         
@@ -45,29 +46,33 @@ class CuriosityEngine:
         """Loads codebase nodes and edges from SQLite, populating the DiGraph and calculating topological metrics."""
         nodes, edges = fetch_graph_data(self.db_path, self.realm)
         
-        # Temporarily store nodes to compute metrics first, then enrich profiles
+        # Populate nodes & types
         for node in nodes:
             title = node['title']
             self.node_types[title] = node.get('node_type', 'unknown')
             self.graph.add_node(title)
+            # Core graph includes only local codebase elements
+            if self.node_types[title] in ["module", "class", "method", "function"]:
+                self.core_graph.add_node(title)
         
         for edge in edges:
-            self.graph.add_edge(
-                edge['source'], 
-                edge['target'], 
-                weight=edge.get('weight', 1.0),
-                edge_type=edge.get('edge_type', 'calls')
-            )
+            src = edge['source']
+            tgt = edge['target']
+            weight = edge.get('weight', 1.0)
+            etype = edge.get('edge_type', 'calls')
             
-        # Compute network-wide metrics if graph is not empty
-        if self.graph.number_of_nodes() > 0:
-            self.degrees = dict(self.graph.degree())
-            self.betweenness = nx.betweenness_centrality(self.graph)
-            self.clustering = nx.clustering(self.graph.to_undirected())
-        else:
-            self.degrees = {}
-            self.betweenness = {}
-            self.clustering = {}
+            # Add to full graph
+            self.graph.add_edge(src, tgt, weight=weight, edge_type=etype)
+            # Add to core graph if both nodes exist in the core graph
+            if self.core_graph.has_node(src) and self.core_graph.has_node(tgt):
+                self.core_graph.add_edge(src, tgt, weight=weight, edge_type=etype)
+            
+        # Compute network-wide metrics over the Core Architecture Graph by default
+        active_metrics_graph = self.core_graph if self.core_graph.number_of_nodes() > 0 else self.graph
+        
+        self.degrees = dict(active_metrics_graph.degree())
+        self.betweenness = nx.betweenness_centrality(active_metrics_graph)
+        self.clustering = nx.clustering(active_metrics_graph.to_undirected())
 
         # Populate node descriptions using precomputed metrics
         for node in nodes:
@@ -81,13 +86,18 @@ class CuriosityEngine:
         sorted_nodes = sorted(self.betweenness.items(), key=lambda x: x[1], reverse=True)
         return [node for node, score in sorted_nodes[:3]]
 
-    def generate_discovery_horizons(self, seed_topic, max_depth=4, alpha=0.7, top_k=4):
+    def generate_discovery_horizons(self, seed_topic, max_depth=4, alpha=0.7, top_k=4, include_external=False):
         """
         Extracts multiple diverse paths branching out from the seed code node.
         Applies a topological ranking matrix and a greedy overlap penalty to guarantee diversity.
         """
-        if seed_topic not in self.graph:
-            return []
+        # Determine the active graph to traverse
+        active_graph = self.graph if include_external else self.core_graph
+        if seed_topic not in active_graph:
+            # Fallback to full graph if not in active graph
+            active_graph = self.graph
+            if seed_topic not in active_graph:
+                return []
 
         paths = []
         limit = 1000  # Safety threshold for dense graphs
@@ -98,7 +108,7 @@ class CuriosityEngine:
             if len(current_path) >= 2:  # Paths of length >= 2 (at least 1 step) are useful for codebase traversal
                 paths.append(list(current_path))
             if len(current_path) - 1 < max_depth:
-                for neighbor in self.graph.successors(node):
+                for neighbor in active_graph.successors(node):
                     if len(paths) >= limit:
                         break
                     if neighbor not in current_path:
@@ -139,7 +149,7 @@ class CuriosityEngine:
                 
                 # Get contextual edge modifier from successor connection if available
                 if i < len(path) - 1:
-                    edge_data = self.graph.get_edge_data(node, path[i+1])
+                    edge_data = active_graph.get_edge_data(node, path[i+1])
                     if edge_data:
                         edge_type = edge_data.get('edge_type', 'calls')
                         if edge_type == "inherits":

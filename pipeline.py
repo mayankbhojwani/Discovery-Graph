@@ -1,19 +1,58 @@
 import os
 import ast
+import builtins
 from database import save_code_graph_to_db
 
-class CodeASTVisitor(ast.NodeVisitor):
+# Extract standard Python built-in names
+BUILTIN_NAMES = set(dir(builtins))
+
+class DefinitionVisitor(ast.NodeVisitor):
+    """
+    Pass 1 Visitor: Extracts all local symbols (classes, methods, functions)
+    defined within a module to build the codebase symbol table.
+    """
     def __init__(self, module_name):
         self.module_name = module_name
+        self.current_class = None
+        self.symbols = set()
+        
+    def visit_ClassDef(self, node):
+        class_fqn = f"{self.module_name}.{node.name}"
+        self.symbols.add(class_fqn)
+        
+        old_class = self.current_class
+        self.current_class = class_fqn
+        self.generic_visit(node)
+        self.current_class = old_class
+        
+    def visit_FunctionDef(self, node):
+        self.visit_any_function(node)
+        
+    def visit_AsyncFunctionDef(self, node):
+        self.visit_any_function(node)
+        
+    def visit_any_function(self, node):
+        if self.current_class:
+            self.symbols.add(f"{self.current_class}.{node.name}")
+        else:
+            self.symbols.add(f"{self.module_name}.{node.name}")
+        self.generic_visit(node)
+
+class CodeASTVisitor(ast.NodeVisitor):
+    """
+    Pass 2 Visitor: Maps structural relationships (calls, containment, imports, inherits)
+    and classifies nodes against the codebase symbol table.
+    """
+    def __init__(self, module_name, local_symbols):
+        self.module_name = module_name
+        self.local_symbols = local_symbols
         self.current_class = None
         self.current_function = None
         
         self.nodes = [] # List of dicts: {"title": ..., "summary": ..., "node_type": ...}
         self.edges = [] # List of dicts: {"source": ..., "target": ..., "edge_type": ...}
         
-        # Local imports mapping name -> fully_qualified_target
         self.imports = {}
-        # List of modules from which * was imported
         self.star_imports = []
         
     def visit_Import(self, node):
@@ -49,7 +88,7 @@ class CodeASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         
     def get_base_class_name(self, node):
-        """Recursively resolves base class names, including attributes and generics/subscripts."""
+        """Recursively resolves class inheritance parents."""
         if isinstance(node, ast.Name):
             return node.id
         elif isinstance(node, ast.Attribute):
@@ -130,7 +169,7 @@ class CodeASTVisitor(ast.NodeVisitor):
         self.current_function = old_func
         
     def get_full_attr_name(self, node):
-        """Recursively resolves nested attribute paths (e.g. os.path.join)."""
+        """Resolves nested attribute accesses (e.g. os.path.join)."""
         if isinstance(node, ast.Name):
             return node.id
         elif isinstance(node, ast.Attribute):
@@ -138,7 +177,6 @@ class CodeASTVisitor(ast.NodeVisitor):
             if val_str:
                 return f"{val_str}.{node.attr}"
         elif isinstance(node, ast.Call):
-            # Fallback for chained calls: a().b()
             return self.get_full_attr_name(node.func)
         return None
 
@@ -176,17 +214,64 @@ class CodeASTVisitor(ast.NodeVisitor):
             
         return f"{self.module_name}.{name}"
 
+def is_builtin_name(name):
+    """Determines if a resolved symbol name matches standard Python built-ins or properties."""
+    if name in BUILTIN_NAMES:
+        return True
+    parts = name.split(".")
+    if parts[0] in BUILTIN_NAMES:
+        return True
+        
+    common_builtins_attrs = {
+        "append", "extend", "insert", "pop", "remove", "clear", "copy", "count", "index",
+        "get", "keys", "values", "items", "update", "split", "strip", "lower", "upper",
+        "join", "replace", "find", "add", "difference", "intersection", "union", "discard",
+        "read", "write", "close", "format", "encode", "decode", "startswith", "endswith"
+    }
+    if parts[-1] in common_builtins_attrs:
+        return True
+    return False
+
 def parse_repository(root_dir):
     """
-    Traverses the codebase directory, extracts module/class/function/method nodes,
-    constructs static containment/inheritance/call edges, and ignores config/temp directories.
-    Resolves star imports (*) and chained attribute calls dynamically.
+    Performs a two-pass static AST codebase parsing:
+    1. Pass 1: Crawl all source files and compile a global local_symbols table.
+    2. Pass 2: Traverse files to map architectural calls, resolve star-imports, and classify node types.
     """
+    exclude_dirs = {".git", "__pycache__", "venv", ".venv", "env", ".agents", "scratch"}
+    
+    # ─── Pass 1: Collect Defined Symbols ───
+    local_symbols = set()
+    for root, dirs, files in os.walk(root_dir):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        for file in files:
+            if file.endswith(".py"):
+                file_path = os.path.join(root, file)
+                
+                rel_path = os.path.relpath(file_path, root_dir)
+                module_parts = rel_path[:-3].replace(os.sep, ".").split(".")
+                if module_parts[-1] == "__init__":
+                    module_parts.pop()
+                module_name = ".".join(module_parts)
+                if not module_name:
+                    module_name = file[:-3]
+                    
+                local_symbols.add(module_name)
+                
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        source = f.read()
+                    tree = ast.parse(source, filename=file_path)
+                    visitor = DefinitionVisitor(module_name)
+                    visitor.visit(tree)
+                    local_symbols.update(visitor.symbols)
+                except Exception as e:
+                    print(f"Error in Pass 1 parsing for {file_path}: {e}")
+
+    # ─── Pass 2: Map AST Structural Call Edges & Classify Nodes ───
     all_nodes = []
     all_edges = []
-    star_imports_map = {} # module_name -> list of star imported modules
-    
-    exclude_dirs = {".git", "__pycache__", "venv", ".venv", "env", ".agents", "scratch"}
+    star_imports_map = {}
     
     for root, dirs, files in os.walk(root_dir):
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
@@ -213,7 +298,7 @@ def parse_repository(root_dir):
                     })
                     
                     tree = ast.parse(source, filename=file_path)
-                    visitor = CodeASTVisitor(module_name)
+                    visitor = CodeASTVisitor(module_name, local_symbols)
                     visitor.visit(tree)
                     
                     all_nodes.extend(visitor.nodes)
@@ -221,16 +306,12 @@ def parse_repository(root_dir):
                     if visitor.star_imports:
                         star_imports_map[module_name] = visitor.star_imports
                 except Exception as e:
-                    print(f"Error parsing {file_path}: {e}")
+                    print(f"Error in Pass 2 parsing for {file_path}: {e}")
                     
-    # Resolve Star Imports and map local titles
-    local_titles = {node["title"] for node in all_nodes}
-    
+    # Post-Parse Star Imports Resolution
     for edge in all_edges:
         target = edge["target"]
-        if target not in local_titles:
-            # Check if it was resolved to a local module name that matches a star import fallback
-            # E.g., target = "app.initialize_db" and "app" has a star import from "database"
+        if target not in local_symbols:
             parts = target.split(".")
             if len(parts) > 1:
                 module_prefix = ".".join(parts[:-1])
@@ -238,31 +319,48 @@ def parse_repository(root_dir):
                 if module_prefix in star_imports_map:
                     for star_mod in star_imports_map[module_prefix]:
                         possible_target = f"{star_mod}.{rel_name}"
-                        if possible_target in local_titles:
+                        if possible_target in local_symbols:
                             edge["target"] = possible_target
                             break
 
-    # Generate nodes for unresolved calls/imports (mark as external)
-    local_titles = {node["title"] for node in all_nodes}
-    external_nodes = set()
+    # Dynamic Classification of Call Targets
+    final_nodes = []
+    added_titles = set()
+    
+    for node in all_nodes:
+        if node["title"] not in added_titles:
+            added_titles.add(node["title"])
+            final_nodes.append(node)
+            
+    # Resolve node_type for target edges not yet defined in final_nodes
     for edge in all_edges:
         target = edge["target"]
-        if target not in local_titles:
-            external_nodes.add(target)
+        if target not in added_titles:
+            added_titles.add(target)
             
-    for ext in external_nodes:
-        if ext.startswith("self."):
-            continue
-        all_nodes.append({
-            "title": ext,
-            "summary": f"External dependency or library import",
-            "node_type": "external"
-        })
-        
-    return all_nodes, all_edges
+            # Categorize the node type
+            if target in local_symbols:
+                # Local symbol that was parsed but node description wasn't created yet
+                # E.g. class methods called dynamically
+                node_type = "method" if "." in target else "function"
+                summary = "Local codebase component definition"
+            elif is_builtin_name(target):
+                node_type = "builtin"
+                summary = "Python runtime built-in function or collection method"
+            else:
+                node_type = "external_library"
+                summary = "External dependency or package import reference"
+                
+            final_nodes.append({
+                "title": target,
+                "summary": summary,
+                "node_type": node_type
+            })
+            
+    return final_nodes, all_edges
 
 def ingest_codebase(repo_path, db_path="curiosity.db"):
-    """Parses a local codebase and commits the structural graph database to SQLite."""
+    """Parses codebase using 2-pass AST parsing and saves the architecture graph to SQLite."""
     nodes, edges = parse_repository(repo_path)
     if not nodes:
         return 0
