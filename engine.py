@@ -52,7 +52,12 @@ class CuriosityEngine:
             self.graph.add_node(title)
         
         for edge in edges:
-            self.graph.add_edge(edge['source'], edge['target'], weight=edge['weight'])
+            self.graph.add_edge(
+                edge['source'], 
+                edge['target'], 
+                weight=edge.get('weight', 1.0),
+                edge_type=edge.get('edge_type', 'calls')
+            )
             
         # Compute network-wide metrics if graph is not empty
         if self.graph.number_of_nodes() > 0:
@@ -94,6 +99,8 @@ class CuriosityEngine:
                 paths.append(list(current_path))
             if len(current_path) - 1 < max_depth:
                 for neighbor in self.graph.successors(node):
+                    if len(paths) >= limit:
+                        break
                     if neighbor not in current_path:
                         current_path.append(neighbor)
                         dfs(neighbor, current_path)
@@ -107,7 +114,7 @@ class CuriosityEngine:
         # Score paths using the B2B Code Understanding topological ranking matrix
         def score_path(path):
             score = 0.0
-            for node in path:
+            for i, node in enumerate(path):
                 deg = self.degrees.get(node, 0)
                 clust = self.clustering.get(node, 0.0)
                 between = self.betweenness.get(node, 0.0)
@@ -129,6 +136,18 @@ class CuriosityEngine:
                 
                 # 3. Information Density: Boost local classes, methods, and functions relative to external dependencies
                 type_boost = 1.2 if node_type in ["class", "method", "function"] else 0.8
+                
+                # Get contextual edge modifier from successor connection if available
+                if i < len(path) - 1:
+                    edge_data = self.graph.get_edge_data(node, path[i+1])
+                    if edge_data:
+                        edge_type = edge_data.get('edge_type', 'calls')
+                        if edge_type == "inherits":
+                            type_boost *= 1.5
+                        elif edge_type == "calls":
+                            type_boost *= 1.3
+                        elif edge_type == "imports":
+                            type_boost *= 0.7
                 
                 # Combined Node Score
                 node_score = (bridge_reward * type_boost) / (hub_penalty * (clust + 0.05))
