@@ -13,6 +13,8 @@ class CodeASTVisitor(ast.NodeVisitor):
         
         # Local imports mapping name -> fully_qualified_target
         self.imports = {}
+        # List of modules from which * was imported
+        self.star_imports = []
         
     def visit_Import(self, node):
         for alias in node.names:
@@ -28,25 +30,43 @@ class CodeASTVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node):
         module = node.module or ""
         for alias in node.names:
-            name = alias.asname or alias.name
-            target = f"{module}.{alias.name}" if module else alias.name
-            self.imports[name] = target
-            self.edges.append({
-                "source": self.module_name,
-                "target": target,
-                "edge_type": "imports"
-            })
+            if alias.name == "*":
+                self.star_imports.append(module)
+                self.edges.append({
+                    "source": self.module_name,
+                    "target": module,
+                    "edge_type": "imports"
+                })
+            else:
+                name = alias.asname or alias.name
+                target = f"{module}.{alias.name}" if module else alias.name
+                self.imports[name] = target
+                self.edges.append({
+                    "source": self.module_name,
+                    "target": target,
+                    "edge_type": "imports"
+                })
         self.generic_visit(node)
         
+    def get_base_class_name(self, node):
+        """Recursively resolves base class names, including attributes and generics/subscripts."""
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            val_str = self.get_base_class_name(node.value)
+            if val_str:
+                return f"{val_str}.{node.attr}"
+        elif isinstance(node, ast.Subscript):
+            return self.get_base_class_name(node.value)
+        return None
+
     def visit_ClassDef(self, node):
         class_name = f"{self.module_name}.{node.name}"
         bases = []
         for base in node.bases:
-            if isinstance(base, ast.Name):
-                bases.append(base.id)
-            elif isinstance(base, ast.Attribute):
-                if isinstance(base.value, ast.Name):
-                    bases.append(f"{base.value.id}.{base.attr}")
+            base_name = self.get_base_class_name(base)
+            if base_name:
+                bases.append(base_name)
         
         summary = f"class {node.name}(" + ", ".join(bases) + "):"
         self.nodes.append({
@@ -109,18 +129,25 @@ class CodeASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         self.current_function = old_func
         
+    def get_full_attr_name(self, node):
+        """Recursively resolves nested attribute paths (e.g. os.path.join)."""
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            val_str = self.get_full_attr_name(node.value)
+            if val_str:
+                return f"{val_str}.{node.attr}"
+        elif isinstance(node, ast.Call):
+            # Fallback for chained calls: a().b()
+            return self.get_full_attr_name(node.func)
+        return None
+
     def visit_Call(self, node):
         if not self.current_function:
             self.generic_visit(node)
             return
             
-        called_name = None
-        if isinstance(node.func, ast.Name):
-            called_name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            if isinstance(node.func.value, ast.Name):
-                called_name = f"{node.func.value.id}.{node.func.attr}"
-                
+        called_name = self.get_full_attr_name(node.func)
         if called_name:
             resolved = self.resolve_call(called_name)
             if resolved:
@@ -153,9 +180,11 @@ def parse_repository(root_dir):
     """
     Traverses the codebase directory, extracts module/class/function/method nodes,
     constructs static containment/inheritance/call edges, and ignores config/temp directories.
+    Resolves star imports (*) and chained attribute calls dynamically.
     """
     all_nodes = []
     all_edges = []
+    star_imports_map = {} # module_name -> list of star imported modules
     
     exclude_dirs = {".git", "__pycache__", "venv", ".venv", "env", ".agents", "scratch"}
     
@@ -189,9 +218,30 @@ def parse_repository(root_dir):
                     
                     all_nodes.extend(visitor.nodes)
                     all_edges.extend(visitor.edges)
+                    if visitor.star_imports:
+                        star_imports_map[module_name] = visitor.star_imports
                 except Exception as e:
                     print(f"Error parsing {file_path}: {e}")
                     
+    # Resolve Star Imports and map local titles
+    local_titles = {node["title"] for node in all_nodes}
+    
+    for edge in all_edges:
+        target = edge["target"]
+        if target not in local_titles:
+            # Check if it was resolved to a local module name that matches a star import fallback
+            # E.g., target = "app.initialize_db" and "app" has a star import from "database"
+            parts = target.split(".")
+            if len(parts) > 1:
+                module_prefix = ".".join(parts[:-1])
+                rel_name = parts[-1]
+                if module_prefix in star_imports_map:
+                    for star_mod in star_imports_map[module_prefix]:
+                        possible_target = f"{star_mod}.{rel_name}"
+                        if possible_target in local_titles:
+                            edge["target"] = possible_target
+                            break
+
     # Generate nodes for unresolved calls/imports (mark as external)
     local_titles = {node["title"] for node in all_nodes}
     external_nodes = set()
