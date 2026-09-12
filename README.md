@@ -50,16 +50,18 @@ Changing db.save_user could affect 5 symbol(s):
 | `impact <symbol>` | What breaks if this changes |
 | `deps <symbol>` | What this relies on — the code to read first |
 | `coverage <symbol>` | Which tests reach it |
+| `coupling <symbol>` | What historically changes alongside it |
 | `dead` | Symbols no entrypoint or test can reach |
 | `find <query>` | Look up a symbol's qualified name |
 | `index <path>` | Parse a codebase into the graph |
+| `history [path]` | Mine git history for change coupling |
 | `stats` | Graph size, entrypoints, tests, coverage, unresolved calls |
 
 ### From Claude Code
 
 [`.mcp.json`](.mcp.json) registers the server for this project — restart Claude Code and approve it. Then ask in plain language: *"what breaks if I change fetch_graph_data?"*
 
-Tools: `impact_of`, `test_coverage`, `dead_code`, `dependencies_of`, `find_symbol`, `index_codebase`, `list_codebases`.
+Tools: `impact_of`, `test_coverage`, `change_coupling`, `dead_code`, `dependencies_of`, `find_symbol`, `index_codebase`, `list_codebases`.
 
 ---
 
@@ -83,6 +85,7 @@ graph TD
 | [`pipeline.py`](pipeline.py) | Two-pass AST parser. Symbols, call resolution, role detection. |
 | [`database.py`](database.py) | Realm-scoped SQLite cache. |
 | [`epicenter.py`](epicenter.py) | Dependency graph, impact/coverage/reachability queries, CLI. |
+| [`cochange.py`](cochange.py) | Change coupling mined from git history. |
 | [`mcp_server.py`](mcp_server.py) | The queries as MCP tools. |
 | [`engine.py`](engine.py) | Centrality-based path ranking (earlier direction, retained). |
 | [`app.py`](app.py) | Streamlit workbench over `engine.py`. |
@@ -132,6 +135,18 @@ Getting dead code from noisy to useful meant handling four ways a framework invo
 | `Foo()` linking to `Foo`, never `Foo.__init__` | Reachability computed to a **fixpoint**, so a live class pulls in its dunders and whatever they call |
 
 On this repository that took the dead list from 46 entries to 1 — and the survivor is real.
+
+### Change coupling
+
+Structure is not the only kind of dependency. Two functions that always change in the same commit are coupled even when neither calls the other — a config key and the code reading it, an encoder and its decoder, a schema writer and its reader. No edge exists to find, so no amount of parsing will surface them. History will.
+
+`epicenter history` walks recent commits, maps each diff hunk onto the symbols defined in that file **at that commit** (not today's layout, which would attribute changes to whatever happens to sit at those lines now), and counts what moves together. Each change is attributed to the innermost symbol covering it, so editing one method does not implicate its whole class.
+
+Coupling is reported as confidence — of the commits touching this symbol, the share that also touched the other — and pairs with no code path between them are flagged, because those are the ones structure cannot tell you about. On this repository, `save_code_graph_to_db` and `fetch_graph_data` come out at 100% with nothing calling anything: the write and read halves of one schema.
+
+It is correlation, not dependency. It needs real history to say anything — a handful of commits will pair things that merely travelled together.
+
+### Roots
 
 Libraries need one more root. Their callers live outside the codebase entirely, so a package's `__init__.py` re-exports — its public surface — are treated as entrypoints. Without that, every public function in a library reads as dead.
 
@@ -184,7 +199,7 @@ The 7 that survive on networkx are backend-interface methods and test helpers re
 .venv/bin/python -m pytest tests -q
 ```
 
-61 tests covering call resolution, storage, impact queries, reachability, package layout, and dynamic dispatch. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
+68 tests covering call resolution, storage, impact queries, reachability, package layout, dynamic dispatch, and history mining. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
 
 ---
 
@@ -196,7 +211,6 @@ Python 3.10+ · NetworkX · SQLite · `ast` · MCP SDK · Streamlit (workbench o
 
 ## 🗺️ Roadmap
 
-- [ ] **Git co-change coupling** — symbols that always change in the same commit are coupled even with no call edge between them. Structural analysis cannot see this.
 - [ ] **Diff blast radius** — impact analysis across a branch or PR rather than a single symbol.
 - [ ] **Context packing** — the minimal token-budgeted set of definitions needed to modify a symbol.
 - [ ] **Real name resolution** — delegate to `pyright` for what heuristics cannot reach.

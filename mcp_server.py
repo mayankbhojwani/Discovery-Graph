@@ -216,6 +216,51 @@ def test_coverage(symbol: str, codebase: str = "") -> str:
 
 
 @mcp.tool()
+def change_coupling(symbol: str, codebase: str = "", min_confidence: float = 0.5) -> str:
+    """Find symbols that historically change in the same commits as this one.
+
+    Use alongside impact_of when planning a change. This catches coupling with
+    no code path between the two ends — a config key and the code reading it,
+    an encoder and its decoder — which call-graph analysis cannot see at all.
+
+    Correlation mined from git history, not a dependency. Requires history to
+    have been analysed for this codebase.
+
+    Args:
+        symbol: Name to analyse.
+        codebase: Which indexed codebase; omit if only one is indexed.
+        min_confidence: Least share of the symbol's commits that must also
+            touch the other symbol, from 0 to 1.
+    """
+    graph = _graph(codebase)
+    target, _ = _pick(graph, symbol)
+
+    if not graph.has_history:
+        return (
+            "No git history analysed for this codebase yet. "
+            "Run `epicenter history <path>` first."
+        )
+
+    coupled = graph.coupled_with(target, min_confidence=min_confidence)
+    if not coupled:
+        return f"Nothing changes alongside {target} often enough to report."
+
+    lines = [f"Symbols that change alongside {target}:", ""]
+    for item in coupled[:20]:
+        note = "" if item["structural"] else "   [no code path between them]"
+        lines.append(
+            f"  {item['confidence']:.0%} ({item['together']}/{item['of_commits']} commits)"
+            f"  {item['symbol']}{note}"
+        )
+    lines.append("")
+    lines.append(
+        "Correlation from history, not a dependency. Pairs marked [no code path] "
+        "are the ones worth attention: coupled in practice, invisible to the call graph."
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def dead_code(codebase: str = "") -> str:
     """List symbols that no entrypoint and no test can reach.
 

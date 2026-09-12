@@ -19,4 +19,4 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["epicenter", "pipeline", "database", "engine"]
+py-modules = ["epicenter", "pipeline", "database", "cochange", "mcp_server", "engine"]

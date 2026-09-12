@@ -69,7 +69,9 @@ class CodeGraph:
         self.roles = {}
         self.subclasses = {}    # base class -> classes directly inheriting it
 
-        self._covered = None    # lazily computed, see covered_symbols()
+        self._covered = None      # lazily computed, see covered_symbols()
+        self._cochange = None     # lazily loaded, see _load_cochange()
+        self._symbol_commits = {}
 
         self._load()
 
@@ -477,6 +479,66 @@ class CodeGraph:
 
         return sorted(dead)
 
+    # ─── Change coupling ────────────────────────────────────────────────────
+
+    def _load_cochange(self):
+        if self._cochange is None:
+            from database import fetch_cochange_data
+            self._cochange, self._symbol_commits = fetch_cochange_data(
+                self.db_path, self.realm
+            )
+        return self._cochange
+
+    @property
+    def has_history(self):
+        return bool(self._load_cochange())
+
+    def coupled_with(self, symbol, min_together=2, min_confidence=0.3):
+        """
+        Symbols that historically change alongside `symbol`.
+
+        Reported as confidence — of the commits touching `symbol`, the share
+        that also touched the other. A raw count alone flatters whatever
+        changes most often, so both a floor on the count and on the share are
+        applied.
+
+        This is correlation drawn from history, not a dependency. It catches
+        real coupling with no code path between the two ends — a config key
+        and its reader, an encoder and its decoder — and it will also happily
+        pair things that merely moved through the same commits.
+        """
+        pairs = self._load_cochange()
+        own_commits = self._symbol_commits.get(symbol, 0)
+        if not own_commits:
+            return []
+
+        results = []
+        for a, b, together in pairs:
+            if a == symbol:
+                other = b
+            elif b == symbol:
+                other = a
+            else:
+                continue
+            if together < min_together:
+                continue
+            confidence = together / own_commits
+            if confidence < min_confidence:
+                continue
+            results.append({
+                "symbol": other,
+                "together": together,
+                "confidence": confidence,
+                "of_commits": own_commits,
+                # Coupling that structure already explains is far less
+                # interesting than coupling it cannot.
+                "structural": self.deps.has_edge(symbol, other)
+                or self.deps.has_edge(other, symbol),
+            })
+
+        results.sort(key=lambda r: (-r["confidence"], -r["together"], r["symbol"]))
+        return results
+
     def stats(self):
         local = [s for s in self.deps.nodes() if self.node_types.get(s) != "module"]
         return {
@@ -548,6 +610,14 @@ def main():
     p_index = sub.add_parser("index", help="parse a codebase into the graph")
     p_index.add_argument("path")
 
+    p_hist = sub.add_parser("history", help="mine git history for change coupling")
+    p_hist.add_argument("path", nargs="?", default=None)
+    p_hist.add_argument("--max-commits", type=int, default=500)
+
+    p_coup = sub.add_parser("coupling", help="symbols that change alongside this one")
+    p_coup.add_argument("symbol")
+    p_coup.add_argument("--min-confidence", type=float, default=0.3)
+
     sub.add_parser("stats", help="graph size")
     sub.add_parser("dead", help="symbols no entrypoint or test can reach")
 
@@ -572,6 +642,28 @@ def main():
         print(f"Indexed {target}")
         for key in ("symbols", "dependency_edges", "entrypoints", "tests", "unreachable"):
             print(f"  {key:20} {stats[key]}")
+        return
+
+    if args.command == "history":
+        from cochange import ingest_history
+
+        target = args.path or args.realm or _default_realm(args.db)
+        if target is None:
+            print("Which codebase? Pass a path, or --realm.")
+            sys.exit(1)
+        target = os.path.abspath(os.path.expanduser(target))
+
+        summary = ingest_history(target, db_path=args.db, max_commits=args.max_commits)
+        if summary is None:
+            print(f"No usable git history for {target}.")
+            print("The directory must be inside a repository that tracks its Python files.")
+            sys.exit(1)
+
+        print(f"Analysed {summary['commits']} commit(s) of {target}")
+        print(f"  {summary['symbols']} symbol(s) changed across them")
+        print(f"  {summary['pairs']} co-change pair(s) recorded")
+        if summary["commits"] < 20:
+            print("\nThin history — coupling needs many commits before it means much.")
         return
 
     realm = args.realm or _default_realm(args.db)
@@ -649,6 +741,20 @@ def main():
             if item.distance > 1:
                 print(f"      via {' <- '.join(reversed(item.path))}")
 
+        # History knows about coupling the call graph cannot: two symbols that
+        # always change together with nothing calling anything.
+        if graph.has_history:
+            structural = {r.symbol for r in results} | {target}
+            hidden = [
+                c for c in graph.coupled_with(target, min_confidence=0.5)
+                if c["symbol"] not in structural and not c["structural"]
+            ]
+            if hidden:
+                print("\n  ── historically changed alongside, with no code path ──")
+                for item in hidden[:5]:
+                    print(f"     {item['confidence']:.0%}  ({item['together']}/{item['of_commits']})"
+                          f"  {item['symbol']}")
+
         untested = [i for i in results if not graph.is_covered(i.symbol)]
         print()
         if not graph.tests:
@@ -658,6 +764,25 @@ def main():
         else:
             print(f"  All {len(results)} affected symbol(s) are reached by some test.")
         print()
+
+    elif args.command == "coupling":
+        if not graph.has_history:
+            print("No history analysed yet. Run: epicenter history")
+            sys.exit(1)
+
+        coupled = graph.coupled_with(target, min_confidence=args.min_confidence)
+        if not coupled:
+            print(f"Nothing changes with {target} often enough to report.")
+            return
+
+        print(f"Symbols that change alongside {target}:\n")
+        for item in coupled:
+            share = f"{item['together']}/{item['of_commits']}"
+            tag = "" if item["structural"] else "   ← no code path between them"
+            print(f"   {item['confidence']:.0%}  ({share})  {item['symbol']}{tag}")
+        print("\nCorrelation from history, not a dependency. The flagged pairs are")
+        print("the interesting ones: coupled in practice, invisible to the call graph.")
+        return
 
     elif args.command == "coverage":
         covering = graph.tests_covering(target)

@@ -63,6 +63,32 @@ def is_environment_dir(path):
     )
 
 
+def module_name_for(rel_path, package_prefix=()):
+    """
+    The module name for a source file, given its path relative to the indexed
+    root. Shared so history analysis names symbols exactly as parsing does —
+    otherwise the two produce names that never join up.
+
+    Returns (module_name, is_package).
+    """
+    parts = rel_path[:-3].replace(os.sep, ".").split(".")
+    is_package = parts[-1] == "__init__"
+    if is_package:
+        parts.pop()
+    parts = list(package_prefix) + parts
+    name = ".".join(parts)
+    if not name:
+        name = os.path.basename(rel_path)[:-3]
+    return name, is_package
+
+
+def package_prefix_for(root_dir):
+    """A directory that is itself a package contributes its own name."""
+    if os.path.isfile(os.path.join(root_dir, "__init__.py")):
+        return [os.path.basename(os.path.normpath(root_dir))]
+    return []
+
+
 def absolute_import_module(module_name, is_package, node):
     """
     Turns a relative import into the module it actually names.
@@ -132,6 +158,7 @@ class DefinitionVisitor(ast.NodeVisitor):
         self.class_symbols = set()
         self.raw_returns = {}
         self.imports = {}
+        self.spans = {}   # symbol -> (first line, last line)
 
     def visit_Import(self, node):
         for alias in node.names:
@@ -151,6 +178,7 @@ class DefinitionVisitor(ast.NodeVisitor):
         class_fqn = f"{self.module_name}.{node.name}"
         self.symbols.add(class_fqn)
         self.class_symbols.add(class_fqn)
+        self.spans[class_fqn] = (node.lineno, getattr(node, "end_lineno", node.lineno))
 
         old_class = self.current_class
         self.current_class = class_fqn
@@ -170,6 +198,8 @@ class DefinitionVisitor(ast.NodeVisitor):
         parent = self.current_function or self.current_class or self.module_name
         func_name = f"{parent}.{node.name}"
         self.symbols.add(func_name)
+
+        self.spans[func_name] = (node.lineno, getattr(node, "end_lineno", node.lineno))
 
         raw_return = annotation_raw_name(node.returns)
         if raw_return:
@@ -792,11 +822,7 @@ def parse_repository(root_dir):
     # Indexing a package directory directly (networkx/, or the common
     # src/mypackage/) would otherwise drop the package's own name, so the
     # code's absolute self-imports never match the symbols parsed from it.
-    package_prefix = (
-        [os.path.basename(os.path.normpath(root_dir))]
-        if os.path.isfile(os.path.join(root_dir, "__init__.py"))
-        else []
-    )
+    package_prefix = package_prefix_for(root_dir)
 
     exclude_dirs = {
         ".git", "__pycache__", ".agents", "scratch", "node_modules",
@@ -820,14 +846,7 @@ def parse_repository(root_dir):
                 file_path = os.path.join(root, file)
                 
                 rel_path = os.path.relpath(file_path, root_dir)
-                module_parts = rel_path[:-3].replace(os.sep, ".").split(".")
-                is_package = module_parts[-1] == "__init__"
-                if is_package:
-                    module_parts.pop()
-                module_parts = package_prefix + module_parts
-                module_name = ".".join(module_parts)
-                if not module_name:
-                    module_name = file[:-3]
+                module_name, is_package = module_name_for(rel_path, package_prefix)
                     
                 local_symbols.add(module_name)
                 
@@ -884,14 +903,7 @@ def parse_repository(root_dir):
                 file_path = os.path.join(root, file)
                 
                 rel_path = os.path.relpath(file_path, root_dir)
-                module_parts = rel_path[:-3].replace(os.sep, ".").split(".")
-                is_package = module_parts[-1] == "__init__"
-                if is_package:
-                    module_parts.pop()
-                module_parts = package_prefix + module_parts
-                module_name = ".".join(module_parts)
-                if not module_name:
-                    module_name = file[:-3]
+                module_name, is_package = module_name_for(rel_path, package_prefix)
                     
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
