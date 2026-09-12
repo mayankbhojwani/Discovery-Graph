@@ -10,11 +10,16 @@ class CuriosityEngine:
         self.node_summaries = {}
         self.node_types = {}
         
-        # Topological metrics
+        # Topological metrics (core graph)
         self.degrees = {}
         self.betweenness = {}
         self.clustering = {}
-        
+
+        # Topological metrics (full graph, including builtins/externals)
+        self.degrees_full = {}
+        self.betweenness_full = {}
+        self.clustering_full = {}
+
         self.load_graph()
 
     def enrich_node_profile(self, title, summary, node_type):
@@ -69,10 +74,20 @@ class CuriosityEngine:
             
         # Compute network-wide metrics over the Core Architecture Graph by default
         active_metrics_graph = self.core_graph if self.core_graph.number_of_nodes() > 0 else self.graph
-        
+
         self.degrees = dict(active_metrics_graph.degree())
         self.betweenness = nx.betweenness_centrality(active_metrics_graph)
         self.clustering = nx.clustering(active_metrics_graph.to_undirected())
+
+        # Also compute metrics over the full graph (including builtins/externals),
+        # so that path scoring is correct when traversal includes those nodes
+        # (see generate_discovery_horizons' `include_external` option). Without
+        # this, nodes outside the core graph would default to degree 0 /
+        # betweenness 0 / clustering 0, which makes them look artificially
+        # under-connected and score higher than real local components.
+        self.degrees_full = dict(self.graph.degree())
+        self.betweenness_full = nx.betweenness_centrality(self.graph)
+        self.clustering_full = nx.clustering(self.graph.to_undirected())
 
         # Populate node descriptions using precomputed metrics
         for node in nodes:
@@ -98,6 +113,15 @@ class CuriosityEngine:
             active_graph = self.graph
             if seed_topic not in active_graph:
                 return []
+
+        # Use the topological metrics computed over whichever graph is actually
+        # being traversed. Using the core-graph metrics while traversing the
+        # full graph (or vice versa) would leave nodes outside that graph with
+        # missing/defaulted metrics, distorting the ranking.
+        using_full_graph = active_graph is self.graph
+        degrees = self.degrees_full if using_full_graph else self.degrees
+        betweenness = self.betweenness_full if using_full_graph else self.betweenness
+        clustering = self.clustering_full if using_full_graph else self.clustering
 
         paths = []
         limit = 1000  # Safety threshold for dense graphs
@@ -125,20 +149,20 @@ class CuriosityEngine:
         def score_path(path):
             score = 0.0
             for i, node in enumerate(path):
-                deg = self.degrees.get(node, 0)
-                clust = self.clustering.get(node, 0.0)
-                between = self.betweenness.get(node, 0.0)
+                deg = degrees.get(node, 0)
+                clust = clustering.get(node, 0.0)
+                between = betweenness.get(node, 0.0)
                 node_type = self.node_types.get(node, "unknown")
-                
+
                 # 1. Hub Penalty: Penalize nodes with high degree (standard degree centrality penalty)
                 hub_penalty = ((deg + 1.0) ** alpha)
-                
+
                 # Extra penalty for helper/utility names
                 name_lower = node.lower()
                 is_util = any(u in name_lower for u in ["util", "helper", "common", "base", "config", "sys", "os", "time"])
                 if is_util:
                     hub_penalty *= 5.0
-                if node_type == "external":
+                if node_type == "external_library":
                     hub_penalty *= 2.0  # Encourage routing through codebase local files
                     
                 # 2. Bridge Reward: Reward high betweenness centrality (highly connected bottlenecks)

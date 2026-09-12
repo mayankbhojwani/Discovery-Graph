@@ -211,7 +211,20 @@ class CodeASTVisitor(ast.NodeVisitor):
             
         if "." in name:
             return name
-            
+
+        # Bare, unqualified call (e.g. `print(x)`, or a nested closure like
+        # `dfs(...)` invoked from inside a method). Check for a real Python
+        # builtin first, then a same-class member (a function nested inside
+        # a method belongs to the enclosing class's scope, not the module),
+        # before falling back to assuming a module-level symbol.
+        if is_builtin_name(name):
+            return name
+
+        if self.current_class:
+            class_candidate = f"{self.current_class}.{name}"
+            if class_candidate in self.local_symbols:
+                return class_candidate
+
         return f"{self.module_name}.{name}"
 
 def is_builtin_name(name):
