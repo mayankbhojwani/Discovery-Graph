@@ -145,7 +145,6 @@ Resolved: constructor assignments, parameter and return annotations, `self` attr
 
 Not resolved:
 
-- **Polymorphic dispatch** — a base class declaring `solve()`, the subclass chosen at runtime. The largest remaining category, and unsolvable without whole-program type inference.
 - **Unannotated indirection** — `get_connection().execute()` where nothing declares a return type. An `Any` annotation carries no information either.
 - **Containers** — `handlers = [Foo()]` then `handlers[0].run()`
 - **Reassignment** — last-write-wins, so a variable changing type mid-function records wrong
@@ -165,15 +164,17 @@ Python only.
 | | This repo | A 2,700-line app | networkx (580 files) |
 |---|---|---|---|
 | Symbols | 171 | 126 | 8,337 |
-| Dependency edges | 179 | 287 | 13,319 |
+| Dependency edges | 187 | 293 | 13,446 |
 | Tests detected | 64 | 27 | 5,227 |
-| Dead-code candidates | 1 | 3 | 232 |
+| Dead-code candidates | 1 | 3 | 7 |
 | Unresolved calls | 40 | 14 | 817 |
 | Index time | <0.1s | 0.3s | 3s |
 
-Every one of those dead-code numbers started far higher. On the application it was 25, on networkx 581. Each round of checking the false positives by hand exposed a distinct resolution gap — callbacks passed but never called, return annotations, relative imports, a package losing its own name. Running it against code neither of us wrote found more bugs than any amount of self-analysis did.
+Every one of those dead-code numbers started far higher. On the application it was 25, on networkx 581. Each round of checking the false positives by hand exposed a distinct gap — callbacks passed but never called, return annotations, relative imports, a package losing its own name, and same-module inheritance building its edge from the import map alone. Running it against code neither of us wrote found far more than self-analysis ever did.
 
-What remains on networkx is largely **polymorphic dispatch**: a base class declaring `solve()`, subclasses overriding it, the implementation chosen at runtime. That is the ceiling of static resolution rather than a gap left to close. 232 of 8,337 symbols is 2.8%.
+Dynamic dispatch is handled rather than conceded. A method whose name is called on a receiver that could not be typed — `registry[key](...).solve()` — is treated as live, and so are subclass overrides of any live method, since calling a base method runs whichever override the instance carries. Neither invents a dependency edge: the call is real but its destination is genuinely unknown, and corrupting impact analysis to tidy up a different report would be the wrong trade.
+
+The 7 that survive on networkx are backend-interface methods and test helpers reached by machinery no parser can follow.
 
 ---
 
@@ -183,7 +184,7 @@ What remains on networkx is largely **polymorphic dispatch**: a base class decla
 .venv/bin/python -m pytest tests -q
 ```
 
-54 tests covering call resolution, storage, impact queries, reachability, and package layout. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
+61 tests covering call resolution, storage, impact queries, reachability, package layout, and dynamic dispatch. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
 
 ---
 

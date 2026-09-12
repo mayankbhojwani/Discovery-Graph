@@ -272,6 +272,12 @@ class CodeASTVisitor(ast.NodeVisitor):
         if not is_method and name in ENTRYPOINT_FUNCTION_NAMES:
             roles.add("entrypoint")
 
+        # pytest discovers its hooks by name - pytest_configure,
+        # pytest_addoption, pytest_collection_modifyitems - and calls them
+        # itself, so nothing in the codebase ever references them.
+        if not is_method and name.startswith("pytest_"):
+            roles.add("entrypoint")
+
         return roles
 
     def visit_If(self, node):
@@ -507,7 +513,11 @@ class CodeASTVisitor(ast.NodeVisitor):
         })
         
         for base in bases:
-            resolved_base = self.imports.get(base, base)
+            # resolve_type_name also covers a base defined in this same
+            # module, which `imports` alone never contains - the common case,
+            # and one that otherwise points the edge at a bare name that
+            # matches no symbol and invents a phantom node.
+            resolved_base = self.resolve_type_name(base) or self.imports.get(base, base)
             self.edges.append({
                 "source": class_name,
                 "target": resolved_base,
@@ -585,6 +595,11 @@ class CodeASTVisitor(ast.NodeVisitor):
                 return f"{val_str}.{node.attr}"
         elif isinstance(node, ast.Call):
             return self.get_full_attr_name(node.func)
+        elif isinstance(node, ast.Subscript):
+            # `graph[node].iter_neighbors()` - the element's type is unknown,
+            # but naming the container still records that *some* method by
+            # this name was called, which is what keeps it off the dead list.
+            return self.get_full_attr_name(node.value)
         return None
 
     def resolve_reference(self, name):
@@ -947,6 +962,17 @@ def parse_repository(root_dir):
             owner = symbol.rsplit(".", 1)[0] if "." in symbol else None
             if owner in star_exports:
                 public.add(symbol)
+    # An exported class publishes its public methods along with itself: a
+    # library user calls them, and no call inside the codebase need exist.
+    for exported in list(public):
+        prefix = exported + "."
+        for symbol in local_symbols:
+            if not symbol.startswith(prefix):
+                continue
+            leaf = symbol[len(prefix):]
+            if "." not in leaf and not leaf.startswith("_"):
+                public.add(symbol)
+
     for node in final_nodes:
         if node["title"] in public and "entrypoint" not in node["roles"]:
             node["roles"] = sorted(set(node["roles"]) | {"entrypoint"})

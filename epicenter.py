@@ -67,12 +67,30 @@ class CodeGraph:
         self.node_types = {}
         self.summaries = {}
         self.roles = {}
+        self.subclasses = {}    # base class -> classes directly inheriting it
 
         self._covered = None    # lazily computed, see covered_symbols()
 
         self._load()
 
     # ─── Role sets ──────────────────────────────────────────────────────────
+
+    @property
+    def dispatched_method_names(self):
+        """
+        Method names appearing in calls whose receiver could not be typed —
+        `C.solve()` where C came out of a registry dict.
+
+        Used only to hold such methods off the dead list, never to create an
+        edge: the call is real but its destination is genuinely unknown, and
+        inventing a dependency would corrupt impact analysis to tidy up a
+        different report.
+        """
+        return {
+            title.rsplit(".", 1)[-1]
+            for title, kind in self.node_types.items()
+            if kind == "unresolved" and "." in title
+        }
 
     @property
     def tests(self):
@@ -114,6 +132,11 @@ class CodeGraph:
                 continue
             if src == tgt:
                 continue
+
+            if etype == "inherits":
+                # Indexed separately so overrides can be found: calling a base
+                # method may execute any subclass's version of it.
+                self.subclasses.setdefault(tgt, set()).add(src)
 
             if etype in STRUCTURAL_EDGES:
                 self.contains.add_edge(src, tgt)
@@ -378,16 +401,58 @@ class CodeGraph:
                 break
             live |= discovered
 
+            dispatched = self.dispatched_method_names
             implicit = set()
             for symbol in discovered:
-                if symbol not in self.contains:
-                    continue
-                for child in self.contains.successors(symbol):
-                    if child not in live and self._framework_invoked(child):
-                        implicit.add(child)
+                if symbol in self.contains:
+                    for child in self.contains.successors(symbol):
+                        if child not in live:
+                            # A method on a live class whose name is called
+                            # somewhere on a receiver that could not be typed.
+                            # Treated as live rather than merely hidden from
+                            # the report, so whatever it calls is reached too.
+                            if (
+                                self._framework_invoked(child)
+                                or (
+                                    self.node_types.get(symbol) == "class"
+                                    and child.rsplit(".", 1)[-1] in dispatched
+                                )
+                            ):
+                                implicit.add(child)
+                implicit |= self._overrides_of(symbol) - live
             frontier = implicit
 
         return live
+
+    def _overrides_of(self, symbol):
+        """
+        Subclass versions of a method that just became live.
+
+        `self.init_solver(L)` in a base __init__ resolves to the base's own
+        method, but the instance is usually a subclass and the subclass's
+        override is what actually runs. Walks the inheritance tree downwards,
+        so overrides of overrides are found too.
+        """
+        parent = self._parent_of(symbol)
+        if parent is None or self.node_types.get(parent) != "class":
+            return set()
+
+        leaf = symbol.rsplit(".", 1)[-1]
+        found = set()
+        pending = list(self.subclasses.get(parent, ()))
+        seen = set()
+
+        while pending:
+            sub = pending.pop()
+            if sub in seen:
+                continue
+            seen.add(sub)
+            candidate = f"{sub}.{leaf}"
+            if candidate in self.deps:
+                found.add(candidate)
+            pending.extend(self.subclasses.get(sub, ()))
+
+        return found
 
     def unreachable(self):
         """
