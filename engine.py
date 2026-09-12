@@ -2,7 +2,7 @@ import networkx as nx
 from database import fetch_graph_data
 
 class CuriosityEngine:
-    def __init__(self, db_path="curiosity.db", realm=None):
+    def __init__(self, db_path="epicenter.db", realm=None):
         self.db_path = db_path
         self.realm = realm
         self.graph = nx.DiGraph()

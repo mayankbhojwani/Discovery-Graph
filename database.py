@@ -1,14 +1,16 @@
 import sqlite3
 import os
 
-DB_NAME = "curiosity.db"
+DB_NAME = "epicenter.db"
 
 # Bumped whenever the table layout changes in a way old rows cannot satisfy.
 # v2: nodes/edges became realm-scoped. Before this, `title` was the sole
 # primary key on `nodes` and `(source, target)` on `edges`, so two indexed
 # codebases sharing a module name (app, main, utils...) collided: the second
 # ingest was silently swallowed by INSERT OR IGNORE.
-SCHEMA_VERSION = 2
+# v3: nodes carry `roles` (test / entrypoint), the roots for coverage and
+# reachability analysis.
+SCHEMA_VERSION = 3
 
 def get_db_connection(db_path=DB_NAME):
     """Establishes and returns a connection to the SQLite database."""
@@ -36,6 +38,7 @@ def initialize_db(db_path=DB_NAME):
         summary TEXT NOT NULL,
         realm TEXT NOT NULL,
         node_type TEXT NOT NULL DEFAULT 'unknown',
+        roles TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (title, realm)
     )
     """)
@@ -75,11 +78,17 @@ def save_code_graph_to_db(realm, nodes, edges, db_path=DB_NAME):
     # 2. Insert nodes
     nodes_batch = []
     for node in nodes:
-        nodes_batch.append((node["title"], node["summary"], realm, node.get("node_type", "unknown")))
+        nodes_batch.append((
+            node["title"],
+            node["summary"],
+            realm,
+            node.get("node_type", "unknown"),
+            ",".join(node.get("roles", [])),
+        ))
 
     cursor.executemany("""
-        INSERT OR IGNORE INTO nodes (title, summary, realm, node_type)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO nodes (title, summary, realm, node_type, roles)
+        VALUES (?, ?, ?, ?, ?)
     """, nodes_batch)
 
     # 3. Insert edges
@@ -107,7 +116,7 @@ def fetch_graph_data(db_path=DB_NAME, realm=None):
     cursor = conn.cursor()
     
     if realm:
-        cursor.execute("SELECT title, summary, node_type FROM nodes WHERE realm = ?", (realm,))
+        cursor.execute("SELECT title, summary, node_type, roles FROM nodes WHERE realm = ?", (realm,))
         nodes = [dict(row) for row in cursor.fetchall()]
 
         cursor.execute("""
@@ -115,7 +124,7 @@ def fetch_graph_data(db_path=DB_NAME, realm=None):
         """, (realm,))
         edges = [dict(row) for row in cursor.fetchall()]
     else:
-        cursor.execute("SELECT title, summary, node_type FROM nodes")
+        cursor.execute("SELECT title, summary, node_type, roles FROM nodes")
         nodes = [dict(row) for row in cursor.fetchall()]
         
         cursor.execute("SELECT source, target, weight, edge_type FROM edges")

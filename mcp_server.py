@@ -1,5 +1,5 @@
 """
-MCP server exposing the codebase dependency graph to AI coding assistants.
+Epicenter's MCP server: codebase impact analysis for AI coding assistants.
 
 The value here is precision. An assistant working without this has to guess at
 structure from text search; these tools answer from a parsed call graph, so
@@ -15,13 +15,13 @@ import sqlite3
 
 from mcp.server.mcpserver import MCPServer
 
-from impact import CodeGraph
+from epicenter import CodeGraph
 from pipeline import ingest_codebase
 
-DB_PATH = os.environ.get("SYNAPSE_DB", "curiosity.db")
+DB_PATH = os.environ.get("EPICENTER_DB", "epicenter.db")
 
 mcp = MCPServer(
-    "codebase-graph",
+    "epicenter",
     instructions=(
         "Precise dependency analysis for Python codebases, answered from a "
         "parsed call graph rather than text search. Call impact_of before "
@@ -153,6 +153,9 @@ def impact_of(symbol: str, codebase: str = "", max_depth: int = 3) -> str:
     lines.append(f"{len(results)} symbol(s) affected — {direct} directly.")
     lines.append("")
 
+    # With no tests at all, every symbol is trivially uncovered. Tagging them
+    # would dress up an absence of information as a finding.
+    has_tests = bool(graph.tests)
     current = None
     for item in results:
         if item.distance != current:
@@ -160,10 +163,89 @@ def impact_of(symbol: str, codebase: str = "", max_depth: int = 3) -> str:
             header = "Direct callers" if current == 1 else f"Indirect, {current} hops away"
             lines.append(f"{header}:")
         risk = "  [HIGH FAN-IN] " if item.fanin >= 5 else "  "
-        lines.append(f"{risk}{item.symbol} ({item.node_type}, {item.fanin} dependents)")
+        cover = "  [UNTESTED]" if has_tests and not graph.is_covered(item.symbol) else ""
+        lines.append(f"{risk}{item.symbol} ({item.node_type}, {item.fanin} dependents){cover}")
         if item.distance > 1:
             lines.append(f"      reached via: {' <- '.join(reversed(item.path))}")
 
+    lines.append("")
+    untested = [i for i in results if not graph.is_covered(i.symbol)]
+    if not graph.tests:
+        lines.append("No tests detected in this codebase, so coverage is unknown.")
+    elif untested:
+        lines.append(
+            f"{len(untested)} of {len(results)} affected symbol(s) have no test reaching them — "
+            "the riskiest part of this change."
+        )
+    else:
+        lines.append("Every affected symbol is reached by some test.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def test_coverage(symbol: str, codebase: str = "") -> str:
+    """Find which tests exercise a symbol.
+
+    Use when deciding whether a change is safe, or what test to run after
+    making one. Reports reachability — a test that reaches this code may not
+    assert anything about it.
+
+    Args:
+        symbol: Name to check.
+        codebase: Which indexed codebase; omit if only one is indexed.
+    """
+    graph = _graph(codebase)
+    target, _ = _pick(graph, symbol)
+
+    if not graph.tests:
+        return f"No tests detected in this codebase, so coverage of {target} is unknown."
+
+    covering = graph.tests_covering(target)
+    if not covering:
+        return (
+            f"No test reaches {target}. Changes to it are unverified by the "
+            f"existing suite."
+        )
+
+    lines = [f"{target} is reached by {len(covering)} test(s):"]
+    lines += [f"  {t}" for t in covering]
+    lines.append("")
+    lines.append("Reachability only — reaching a symbol is not the same as asserting on it.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def dead_code(codebase: str = "") -> str:
+    """List symbols that no entrypoint and no test can reach.
+
+    Use when looking for code to remove. Results are candidates for review,
+    not confirmed dead code: call resolution is heuristic, so a symbol whose
+    only caller could not be resolved will appear here wrongly.
+
+    Args:
+        codebase: Which indexed codebase; omit if only one is indexed.
+    """
+    graph = _graph(codebase)
+
+    if not (graph.entrypoints or graph.tests):
+        return (
+            "No entrypoints or tests detected, so every symbol would appear dead. "
+            "Reachability needs roots: a __main__ guard, a route decorator, or tests."
+        )
+
+    dead = graph.unreachable()
+    if not dead:
+        return "Every symbol is reachable from an entrypoint or a test."
+
+    lines = [
+        f"{len(dead)} symbol(s) unreachable from "
+        f"{len(graph.entrypoints)} entrypoint(s) and {len(graph.tests)} test(s):"
+    ]
+    lines += [f"  {s} ({graph.node_types.get(s, 'unknown')})" for s in dead]
+    lines.append("")
+    lines.append("Candidates for review — verify before deleting. Unresolved calls "
+                 "can make live code look dead.")
     return "\n".join(lines)
 
 

@@ -6,6 +6,31 @@ from database import save_code_graph_to_db
 # Extract standard Python built-in names
 BUILTIN_NAMES = set(dir(builtins))
 
+# Decorators that only modify a function in place, rather than handing it to
+# something that will call it later. Everything NOT on this list is treated as
+# registration — `@app.route`, `@mcp.tool`, `@pytest.fixture`, `@celery.task`
+# and every framework's equivalent all mean "something outside this codebase
+# holds a reference to this function and will invoke it". Enumerating inert
+# decorators is tractable; enumerating every framework's registering ones is
+# not.
+INERT_DECORATORS = {
+    "staticmethod", "classmethod", "abstractmethod", "abstractproperty",
+    "override", "overload", "final", "wraps", "lru_cache", "cache",
+    "dataclass", "total_ordering", "contextmanager", "asynccontextmanager",
+    "singledispatch", "singledispatchmethod", "runtime_checkable",
+}
+
+# Decorators making a function reachable by attribute access rather than a
+# call, so no call edge will ever point at it.
+DESCRIPTOR_DECORATORS = {
+    "property", "cached_property", "setter", "getter", "deleter",
+}
+
+# Names that conventionally mean "this is where execution starts". Applied
+# only to module-level functions: `run` as a method is far too common to treat
+# as an entrypoint.
+ENTRYPOINT_FUNCTION_NAMES = {"main", "cli"}
+
 class DefinitionVisitor(ast.NodeVisitor):
     """
     Pass 1 Visitor: Extracts all local symbols (classes, methods, functions)
@@ -62,6 +87,78 @@ class CodeASTVisitor(ast.NodeVisitor):
         # annotations, which covers the common cases without a type checker.
         self.scope_stack = [{}]          # stack of {variable name: type FQN}
         self.class_attrs = {}            # class FQN -> {attribute name: type FQN}
+
+        # ─── Roles ───
+        # Which symbols are tests, and which are reachable from outside the
+        # codebase. Together these give the graph its roots: anything no test
+        # and no entrypoint can reach is a dead-code candidate.
+        self.module_roles = set()
+        self.is_test_module = self._looks_like_test_module(module_name)
+
+    @staticmethod
+    def _looks_like_test_module(module_name):
+        leaf = module_name.split(".")[-1]
+        return (
+            leaf.startswith("test_")
+            or leaf.endswith("_test")
+            or "tests" in module_name.split(".")
+            or leaf == "conftest"
+        )
+
+    def decorator_names(self, node):
+        """Final attribute of each decorator, e.g. `app.route` -> 'route'."""
+        names = []
+        for dec in node.decorator_list:
+            target = dec.func if isinstance(dec, ast.Call) else dec
+            full = self.get_full_attr_name(target)
+            if full:
+                names.append(full.split(".")[-1])
+        return names
+
+    def function_roles(self, node, name, is_method):
+        """Classifies a function as test and/or entrypoint."""
+        roles = set()
+        decorators = self.decorator_names(node)
+
+        # Name-based detection is confined to test modules, matching what a
+        # runner actually collects. Without that guard any ordinary function
+        # named `test_coverage` is mistaken for a test, and its dependencies
+        # are then reported as covered when nothing tests them at all.
+        if self.is_test_module:
+            if name.startswith("test"):
+                roles.add("test")
+            elif is_method and self.current_class and self.current_class.split(".")[-1].startswith("Test"):
+                if name in {"setUp", "tearDown", "setup_method", "teardown_method"}:
+                    roles.add("test")
+        if "fixture" in decorators:
+            roles.add("test")
+
+        if any(d in DESCRIPTOR_DECORATORS for d in decorators):
+            roles.add("implicit")
+        elif any(d not in INERT_DECORATORS for d in decorators):
+            # Decorated by something that is not purely a modifier, so a
+            # framework is holding this function and will call it.
+            roles.add("entrypoint")
+
+        if not is_method and name in ENTRYPOINT_FUNCTION_NAMES:
+            roles.add("entrypoint")
+
+        return roles
+
+    def visit_If(self, node):
+        """Detects the `if __name__ == "__main__":` guard, which makes the
+        enclosing module an execution entrypoint."""
+        test = node.test
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "__main__"
+        ):
+            self.module_roles.add("entrypoint")
+        self.generic_visit(node)
         
     def visit_Import(self, node):
         for alias in node.names:
@@ -232,10 +329,24 @@ class CodeASTVisitor(ast.NodeVisitor):
                 bases.append(base_name)
         
         summary = f"class {node.name}(" + ", ".join(bases) + "):"
+        class_roles = set()
+        if node.name.startswith("Test") or (self.is_test_module and node.name.endswith("Test")):
+            class_roles.add("test")
+
+        # A base class defined outside this codebase hides its own contract:
+        # any method here may be an override the framework invokes, with no
+        # call edge to show for it (ast.NodeVisitor dispatching to visit_Call
+        # is the case in point). Recorded so reachability can allow for it.
+        for base in bases:
+            resolved = self.resolve_type_name(base)
+            if resolved is None or resolved not in self.local_symbols:
+                class_roles.add("external_base")
+                break
         self.nodes.append({
             "title": class_name,
             "summary": summary,
-            "node_type": "class"
+            "node_type": "class",
+            "roles": sorted(class_roles),
         })
         
         self.edges.append({
@@ -274,11 +385,13 @@ class CodeASTVisitor(ast.NodeVisitor):
             
         args_list = [arg.arg for arg in node.args.args]
         summary = f"def {node.name}(" + ", ".join(args_list) + "):"
-        
+
+        roles = self.function_roles(node, node.name, is_method=bool(self.current_class))
         self.nodes.append({
             "title": func_name,
             "summary": summary,
-            "node_type": node_type
+            "node_type": node_type,
+            "roles": sorted(roles),
         })
         
         parent = self.current_class or self.module_name
@@ -455,17 +568,23 @@ def parse_repository(root_dir):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         source = f.read()
-                    
-                    all_nodes.append({
-                        "title": module_name,
-                        "summary": f"module {file}",
-                        "node_type": "module"
-                    })
-                    
+
                     tree = ast.parse(source, filename=file_path)
                     visitor = CodeASTVisitor(module_name, local_symbols)
                     visitor.visit(tree)
-                    
+
+                    # Appended after the walk: the `__main__` guard that makes
+                    # a module an entrypoint is only found during visiting.
+                    module_roles = set(visitor.module_roles)
+                    if visitor.is_test_module:
+                        module_roles.add("test")
+                    all_nodes.append({
+                        "title": module_name,
+                        "summary": f"module {file}",
+                        "node_type": "module",
+                        "roles": sorted(module_roles),
+                    })
+
                     all_nodes.extend(visitor.nodes)
                     all_edges.extend(visitor.edges)
                     if visitor.star_imports:
@@ -519,12 +638,13 @@ def parse_repository(root_dir):
             final_nodes.append({
                 "title": target,
                 "summary": summary,
-                "node_type": node_type
+                "node_type": node_type,
+                "roles": [],
             })
             
     return final_nodes, all_edges
 
-def ingest_codebase(repo_path, db_path="curiosity.db"):
+def ingest_codebase(repo_path, db_path="epicenter.db"):
     """Parses codebase using 2-pass AST parsing and saves the architecture graph to SQLite."""
     nodes, edges = parse_repository(repo_path)
     if not nodes:

@@ -8,7 +8,7 @@ from pipeline import ingest_codebase
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SynapseHorizon: Codebase Architecture Engine",
+    page_title="Epicenter: Codebase Impact Analysis",
     page_icon="🌐",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -178,7 +178,7 @@ button[data-baseweb="tab"][aria-selected="true"] {
 # WELCOME / DATABASE SETUP SCREEN
 # ════════════════════════════════════════════════════════════════════════════════
 if "selected_realm" not in st.session_state:
-    st.markdown('<div class="main-title">🌐 SynapseHorizon</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-title">🌐 Epicenter</div>', unsafe_allow_html=True)
     st.markdown('<div class="subtitle">Graph-Based Codebase Architecture understanding Engine</div>', unsafe_allow_html=True)
 
     col_a, col_b, col_c = st.columns(3)
@@ -206,7 +206,7 @@ if "selected_realm" not in st.session_state:
         if st.button("🔌 Construct Graph Database", key="btn_manifest_welcome", use_container_width=True):
             if custom_topic.strip() and os.path.exists(custom_topic.strip()):
                 with st.spinner("Analyzing codebase directory & generating AST sub-graph..."):
-                    count = ingest_codebase(custom_topic.strip(), db_path="curiosity.db")
+                    count = ingest_codebase(custom_topic.strip(), db_path="epicenter.db")
                     if count > 0:
                         st.session_state.selected_realm = custom_topic.strip()
                         st.success(f"Codebase parsed successfully! Indexed {count} call graph edges. Loading workspace...")
@@ -219,7 +219,7 @@ if "selected_realm" not in st.session_state:
 
         # Saved realms
         try:
-            conn = sqlite3.connect("curiosity.db")
+            conn = sqlite3.connect("epicenter.db")
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT realm FROM nodes")
             saved_realms = [row[0] for row in cursor.fetchall() if row[0]]
@@ -310,7 +310,7 @@ with c_left:
     st.markdown('<div class="b2b-btn" style="margin-top: 8px;">', unsafe_allow_html=True)
     if st.button("🔄 Rescan Repository Directory", use_container_width=True):
         with st.spinner("Re-parsing source files & rebuilding call graph..."):
-            count = ingest_codebase(st.session_state.selected_realm, db_path="curiosity.db")
+            count = ingest_codebase(st.session_state.selected_realm, db_path="epicenter.db")
             if count > 0:
                 st.toast(f"🚀 Rescan complete! Refreshed {count} relationships.")
                 time.sleep(1.0)
@@ -324,7 +324,7 @@ with c_left:
     # Switch realm options
     st.markdown("**📂 Switch Codebase**")
     try:
-        conn = sqlite3.connect("curiosity.db")
+        conn = sqlite3.connect("epicenter.db")
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT realm FROM nodes")
         saved_realms = [row[0] for row in cursor.fetchall() if row[0]]

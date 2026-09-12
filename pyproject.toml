@@ -1,0 +1,22 @@
+[project]
+name = "epicenter"
+version = "0.1.0"
+description = "Name a symbol; see everything that shakes. Codebase impact analysis over MCP."
+requires-python = ">=3.10"
+dependencies = [
+    "networkx",
+    "mcp[cli]",
+]
+
+[project.optional-dependencies]
+workbench = ["streamlit"]
+
+[project.scripts]
+epicenter = "epicenter:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["epicenter", "pipeline", "database", "engine"]

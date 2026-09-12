@@ -1,7 +1,8 @@
 """
-Impact analysis over the parsed codebase graph.
+Epicenter: impact analysis over a parsed codebase graph.
 
-Answers the question a developer actually asks before editing something:
+Name a symbol — the epicenter — and this reports everything that shakes.
+The question a developer actually asks before editing something:
 "if I change this, what breaks?"
 
 The core distinction this module makes is between *dependency* edges and
@@ -52,7 +53,7 @@ class CodeGraph:
       * `contains` — parent -> child (module -> class -> method)
     """
 
-    def __init__(self, db_path="curiosity.db", realm=None, include_external=False):
+    def __init__(self, db_path="epicenter.db", realm=None, include_external=False):
         self.db_path = db_path
         self.realm = realm
         self.include_external = include_external
@@ -61,8 +62,21 @@ class CodeGraph:
         self.contains = nx.DiGraph()
         self.node_types = {}
         self.summaries = {}
+        self.roles = {}
+
+        self._covered = None    # lazily computed, see covered_symbols()
 
         self._load()
+
+    # ─── Role sets ──────────────────────────────────────────────────────────
+
+    @property
+    def tests(self):
+        return {s for s, r in self.roles.items() if "test" in r}
+
+    @property
+    def entrypoints(self):
+        return {s for s, r in self.roles.items() if "entrypoint" in r}
 
     # ─── Loading ────────────────────────────────────────────────────────────
 
@@ -79,6 +93,8 @@ class CodeGraph:
             title = node["title"]
             self.node_types[title] = node.get("node_type", "unknown")
             self.summaries[title] = node.get("summary", "")
+            raw_roles = node.get("roles") or ""
+            self.roles[title] = {r for r in raw_roles.split(",") if r}
 
         for node in nodes:
             title = node["title"]
@@ -241,12 +257,155 @@ class CodeGraph:
             for n in order
         ]
 
+    # ─── Coverage and reachability ──────────────────────────────────────────
+
+    def _reachable_from(self, seeds):
+        """Everything the given symbols can reach by following dependencies
+        forwards. Multi-source, so the whole set costs one traversal."""
+        seen = {s for s in seeds if s in self.deps}
+        queue = list(seen)
+        while queue:
+            node = queue.pop()
+            for dep in self.deps.successors(node):
+                if dep not in seen:
+                    seen.add(dep)
+                    queue.append(dep)
+        return seen
+
+    def covered_symbols(self):
+        """Symbols some test can reach. This is reachability, not line
+        coverage — it says a test exercises a path to this code, not that it
+        asserts anything useful about it."""
+        if self._covered is None:
+            self._covered = self._reachable_from(self.tests)
+        return self._covered
+
+    def is_covered(self, symbol):
+        return symbol in self.covered_symbols()
+
+    def tests_covering(self, symbol):
+        """The specific tests whose dependencies reach `symbol`."""
+        if symbol not in self.deps:
+            return []
+        tests = self.tests
+        return sorted(
+            item.symbol
+            for item in self.impact_of(symbol, max_depth=None)
+            if item.symbol in tests
+        )
+
+    def _parent_of(self, symbol):
+        parents = list(self.contains.predecessors(symbol)) if symbol in self.contains else []
+        return parents[0] if parents else None
+
+    def script_modules(self):
+        """
+        Modules nothing imports, yet which have module-level dependencies of
+        their own — they exist to be executed directly. Streamlit apps and
+        plain scripts qualify without ever writing a `__main__` guard, and
+        treating them as roots keeps everything below them off the dead list.
+        """
+        roots = set()
+        for symbol in self.deps.nodes():
+            if self.node_types.get(symbol) != "module":
+                continue
+            if self.deps.in_degree(symbol) == 0 and self.deps.out_degree(symbol) > 0:
+                roots.add(symbol)
+        return roots
+
+    def reachability_roots(self):
+        return self.entrypoints | self.tests | self.script_modules()
+
+    def _framework_invoked(self, symbol):
+        """
+        True when something outside the codebase may call this without leaving
+        a call edge behind. These are the cases static analysis cannot see, so
+        they are excluded from the dead list rather than reported wrongly.
+        """
+        roles = self.roles.get(symbol, set())
+        # Properties and other descriptors are reached by attribute access.
+        if "implicit" in roles:
+            return True
+
+        leaf = symbol.split(".")[-1]
+        parent = self._parent_of(symbol)
+
+        # Dunders are invoked by the interpreter: `Foo()` yields an edge to
+        # Foo, never to Foo.__init__.
+        if leaf.startswith("__") and leaf.endswith("__"):
+            return True
+
+        # A method of a class whose base lies outside this codebase may be an
+        # override the base calls itself.
+        if parent and "external_base" in self.roles.get(parent, set()):
+            return True
+
+        return False
+
+    def live_symbols(self):
+        """
+        Everything reachable from the roots, computed to a fixpoint.
+
+        One pass is not enough. A live class pulls in its framework-invoked
+        members — `Foo()` links to Foo, not Foo.__init__ — and those members
+        call further code, which may make yet more classes live. Iterating
+        until nothing new appears is what keeps a constructor's callees off
+        the dead list.
+        """
+        live = set()
+        frontier = set(self.reachability_roots())
+
+        while frontier:
+            discovered = (frontier | self._reachable_from(frontier)) - live
+            if not discovered:
+                break
+            live |= discovered
+
+            implicit = set()
+            for symbol in discovered:
+                if symbol not in self.contains:
+                    continue
+                for child in self.contains.successors(symbol):
+                    if child not in live and self._framework_invoked(child):
+                        implicit.add(child)
+            frontier = implicit
+
+        return live
+
+    def unreachable(self):
+        """
+        Symbols no entrypoint, test, or script module can reach — dead code
+        candidates.
+
+        Candidates, not conclusions. Call resolution under-reports, so an
+        unreferenced symbol may simply be one whose caller could not be
+        resolved. Treat this as a list to review, never to delete from.
+        """
+        live = self.live_symbols()
+
+        dead = []
+        for symbol in self.deps.nodes():
+            if symbol in live:
+                continue
+            if self.node_types.get(symbol) == "module":
+                continue  # modules are containers, judged by their contents
+            if self._framework_invoked(symbol):
+                continue
+            dead.append(symbol)
+
+        return sorted(dead)
+
     def stats(self):
+        local = [s for s in self.deps.nodes() if self.node_types.get(s) != "module"]
         return {
             "realm": self.realm,
             "symbols": self.deps.number_of_nodes(),
             "dependency_edges": self.deps.number_of_edges(),
             "containment_edges": self.contains.number_of_edges(),
+            "entrypoints": len(self.entrypoints),
+            "tests": len(self.tests),
+            "covered_by_tests": sum(1 for s in local if self.is_covered(s)),
+            "unreachable": len(self.unreachable()),
         }
 
 
@@ -267,10 +426,11 @@ def _default_realm(db_path):
 
 def main():
     import argparse
+    import os
     import sys
 
     parser = argparse.ArgumentParser(description="Ask what breaks if you change something.")
-    parser.add_argument("--db", default="curiosity.db")
+    parser.add_argument("--db", default="epicenter.db")
     parser.add_argument("--realm", default=None, help="indexed codebase path")
     parser.add_argument("--external", action="store_true", help="include builtins and third-party symbols")
 
@@ -287,9 +447,34 @@ def main():
     p_find = sub.add_parser("find", help="look up a symbol name")
     p_find.add_argument("query")
 
+    p_index = sub.add_parser("index", help="parse a codebase into the graph")
+    p_index.add_argument("path")
+
     sub.add_parser("stats", help="graph size")
+    sub.add_parser("dead", help="symbols no entrypoint or test can reach")
+
+    p_cov = sub.add_parser("coverage", help="which tests reach a symbol")
+    p_cov.add_argument("symbol")
 
     args = parser.parse_args()
+
+    # Indexing runs before any graph is loaded — there may not be one yet.
+    if args.command == "index":
+        from pipeline import ingest_codebase
+
+        target = os.path.abspath(os.path.expanduser(args.path))
+        if not os.path.isdir(target):
+            print(f"Not a directory: {target}")
+            sys.exit(1)
+        if not ingest_codebase(target, db_path=args.db):
+            print(f"No Python files or no relationships found in {target}.")
+            sys.exit(1)
+
+        stats = CodeGraph(db_path=args.db, realm=target).stats()
+        print(f"Indexed {target}")
+        for key in ("symbols", "dependency_edges", "entrypoints", "tests", "unreachable"):
+            print(f"  {key:20} {stats[key]}")
+        return
 
     realm = args.realm or _default_realm(args.db)
     graph = CodeGraph(db_path=args.db, realm=realm, include_external=args.external)
@@ -297,6 +482,22 @@ def main():
     if args.command == "stats":
         for key, value in graph.stats().items():
             print(f"{key:20} {value}")
+        return
+
+    if args.command == "dead":
+        dead = graph.unreachable()
+        roots = len(graph.reachability_roots())
+        if not roots:
+            print("No entrypoints or tests detected — every symbol would look dead.")
+            print("Reachability needs roots: a __main__ guard, a route decorator, or tests.")
+            return
+        if not dead:
+            print("Every symbol is reachable from an entrypoint or a test.")
+            return
+        print(f"{len(dead)} symbol(s) unreachable from any entrypoint or test:\n")
+        for symbol in dead:
+            print(f"   {symbol}  ({graph.node_types.get(symbol, 'unknown')})")
+        print("\nCandidates only — unresolved calls can make live code look dead.")
         return
 
     if args.command == "find":
@@ -325,6 +526,9 @@ def main():
             return
 
         print(f"Changing {target} could affect {len(results)} symbol(s):\n")
+        # With no tests at all, every symbol is trivially uncovered. Tagging
+        # them would dress up an absence of information as a finding.
+        has_tests = bool(graph.tests)
         current = None
         for item in results:
             if item.distance != current:
@@ -332,10 +536,33 @@ def main():
                 label = "directly" if current == 1 else f"{current} hops away"
                 print(f"  ── {label} ──")
             flag = "  ⚠" if item.fanin >= 5 else "   "
-            print(f"{flag} {item.symbol}  ({item.node_type}, {item.fanin} dependents)")
+            cover = "  [UNTESTED]" if has_tests and not graph.is_covered(item.symbol) else ""
+            print(f"{flag} {item.symbol}  ({item.node_type}, {item.fanin} dependents){cover}")
             if item.distance > 1:
                 print(f"      via {' <- '.join(reversed(item.path))}")
+
+        untested = [i for i in results if not graph.is_covered(i.symbol)]
         print()
+        if not graph.tests:
+            print("  No tests detected in this codebase, so coverage is unknown.")
+        elif untested:
+            print(f"  {len(untested)} of {len(results)} affected symbol(s) have no test reaching them.")
+        else:
+            print(f"  All {len(results)} affected symbol(s) are reached by some test.")
+        print()
+
+    elif args.command == "coverage":
+        covering = graph.tests_covering(target)
+        if not graph.tests:
+            print("No tests detected in this codebase.")
+        elif covering:
+            print(f"{target} is reached by {len(covering)} test(s):\n")
+            for t in covering:
+                print(f"   {t}")
+            print("\nReachability, not assertion — a test touching this path may not check it.")
+        else:
+            print(f"No test reaches {target}.")
+        return
 
     elif args.command == "deps":
         results = graph.dependencies_of(target, max_depth=args.depth)
