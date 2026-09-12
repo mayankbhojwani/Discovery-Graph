@@ -433,16 +433,27 @@ class CodeGraph:
 
 # ─── CLI ────────────────────────────────────────────────────────────────────
 
-def _default_realm(db_path):
-    """Uses the only indexed realm if there is exactly one, so the common case
-    needs no --realm flag."""
+def _indexed_realms(db_path):
     import sqlite3
     try:
         conn = sqlite3.connect(db_path)
         realms = [r[0] for r in conn.execute("SELECT DISTINCT realm FROM nodes") if r[0]]
         conn.close()
+        return realms
     except Exception:
-        return None
+        return []
+
+
+def _default_realm(db_path):
+    """
+    Uses the only indexed realm if there is exactly one, so the common case
+    needs no --realm flag.
+
+    Returns None when several are indexed; the caller must refuse rather than
+    query without one, since an unfiltered query silently merges every
+    indexed codebase into a single graph and answers from the blend.
+    """
+    realms = _indexed_realms(db_path)
     return realms[0] if len(realms) == 1 else None
 
 
@@ -499,6 +510,16 @@ def main():
         return
 
     realm = args.realm or _default_realm(args.db)
+    if realm is None:
+        indexed = _indexed_realms(args.db)
+        if not indexed:
+            print("No codebase indexed yet. Run: epicenter index <path>")
+        else:
+            print("Several codebases are indexed; pass --realm to choose one:")
+            for r in indexed:
+                print(f"   {r}")
+        sys.exit(1)
+
     graph = CodeGraph(db_path=args.db, realm=realm, include_external=args.external)
 
     if args.command == "stats":

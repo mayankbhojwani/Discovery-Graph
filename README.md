@@ -27,9 +27,11 @@ python3 -m venv .venv && .venv/bin/python -m pip install -e .
 Index a codebase, then ask:
 
 ```bash
-.venv/bin/epicenter index /path/to/repo   # or: python -c "from pipeline import ingest_codebase; ingest_codebase('.')"
+.venv/bin/epicenter index /path/to/repo
 .venv/bin/epicenter impact save_user
 ```
+
+With more than one codebase indexed, name which to query: `--realm /path/to/repo`.
 
 ```
 Changing db.save_user could affect 5 symbol(s):
@@ -131,30 +133,47 @@ Getting dead code from noisy to useful meant handling four ways a framework invo
 
 On this repository that took the dead list from 46 entries to 1 — and the survivor is real.
 
+Libraries need one more root. Their callers live outside the codebase entirely, so a package's `__init__.py` re-exports — its public surface — are treated as entrypoints. Without that, every public function in a library reads as dead.
+
 ---
 
 ## ⚠️ Known limitations
 
 Resolution is heuristic, not a type checker. It is **incomplete, and errors run toward under-reporting**: a listed caller is reliable, but *"nothing depends on this"* is the answer to distrust.
 
-Not currently resolved:
+Resolved: constructor assignments, parameter and return annotations, `self` attributes, closures, class-qualified calls, callbacks and bound-method references, relative imports, and package re-exports.
 
-- **Return-value chaining** — `get_connection().execute()`
-- **Cross-module inference** — a variable assigned from a function defined elsewhere
+Not resolved:
+
+- **Polymorphic dispatch** — a base class declaring `solve()`, the subclass chosen at runtime. The largest remaining category, and unsolvable without whole-program type inference.
+- **Unannotated indirection** — `get_connection().execute()` where nothing declares a return type. An `Any` annotation carries no information either.
 - **Containers** — `handlers = [Foo()]` then `handlers[0].run()`
 - **Reassignment** — last-write-wins, so a variable changing type mid-function records wrong
-- **Duck typing** — unsolvable without full type inference
+- **Duck typing** — same ceiling
 
 Two more things to hold loosely:
 
 - **Test coverage here means reachability**, not assertion. A test that reaches a symbol may not check anything about it. It is a floor on confidence, not a measure of it.
 - **Dead code is a list of candidates**, never a delete list. An unresolved caller makes live code look dead.
 
-`stats` reports **`unresolved_calls`** — call sites the parser could not tie to any symbol. Those targets are typed `unresolved` rather than filed as external libraries, so the size of the blind spot is visible instead of hidden. On this repository it currently sits at 31.
-
-Measured on this repository: 149 symbols, 145 dependency edges, 13 entrypoints, 50 tests, 1 unreachable symbol. On networkx (580 files): 14,118 nodes and 62,143 raw edges parsed in 2.3s with zero parse errors — but only 2,026 unique local dependency edges, with 2,193 of 8,278 local symbols participating in even one. That is a realistic picture of coverage on large untyped code, and the honest reason to treat a negative result as inconclusive. Closing the gap means integrating `pyright` or `scip-python`.
+`stats` reports **`unresolved_calls`** — call sites the parser could not tie to any symbol. Those targets are typed `unresolved` rather than filed as external libraries, so the size of the blind spot is visible instead of hidden.
 
 Python only.
+
+### Measured
+
+| | This repo | A 2,700-line app | networkx (580 files) |
+|---|---|---|---|
+| Symbols | 171 | 126 | 8,337 |
+| Dependency edges | 179 | 287 | 13,319 |
+| Tests detected | 64 | 27 | 5,227 |
+| Dead-code candidates | 1 | 3 | 232 |
+| Unresolved calls | 40 | 14 | 817 |
+| Index time | <0.1s | 0.3s | 3s |
+
+Every one of those dead-code numbers started far higher. On the application it was 25, on networkx 581. Each round of checking the false positives by hand exposed a distinct resolution gap — callbacks passed but never called, return annotations, relative imports, a package losing its own name. Running it against code neither of us wrote found more bugs than any amount of self-analysis did.
+
+What remains on networkx is largely **polymorphic dispatch**: a base class declaring `solve()`, subclasses overriding it, the implementation chosen at runtime. That is the ceiling of static resolution rather than a gap left to close. 232 of 8,337 symbols is 2.8%.
 
 ---
 
@@ -164,7 +183,7 @@ Python only.
 .venv/bin/python -m pytest tests -q
 ```
 
-41 tests covering call resolution, storage, impact queries, and reachability. Most are regressions for bugs that were found by running Epicenter on itself — the realm-collision data loss, the `test_`-prefix misclassification, closures collapsing into one node, and each of the framework-dispatch false positives in the dead-code list.
+54 tests covering call resolution, storage, impact queries, reachability, and package layout. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
 
 ---
 
