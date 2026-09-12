@@ -48,12 +48,20 @@ class CodeASTVisitor(ast.NodeVisitor):
         self.local_symbols = local_symbols
         self.current_class = None
         self.current_function = None
-        
+
         self.nodes = [] # List of dicts: {"title": ..., "summary": ..., "node_type": ...}
         self.edges = [] # List of dicts: {"source": ..., "target": ..., "edge_type": ...}
-        
+
         self.imports = {}
         self.star_imports = []
+
+        # ─── Local type environment ───
+        # Without knowing what a variable holds, `db = Database()` followed by
+        # `db.save()` yields no usable edge, which is most real Python. These
+        # track the little that can be inferred from constructor calls and
+        # annotations, which covers the common cases without a type checker.
+        self.scope_stack = [{}]          # stack of {variable name: type FQN}
+        self.class_attrs = {}            # class FQN -> {attribute name: type FQN}
         
     def visit_Import(self, node):
         for alias in node.names:
@@ -99,6 +107,122 @@ class CodeASTVisitor(ast.NodeVisitor):
             return self.get_base_class_name(node.value)
         return None
 
+    # ─── Type inference ─────────────────────────────────────────────────────
+
+    def resolve_type_name(self, name):
+        """
+        Turns a type reference as written (`Database`, `nx.DiGraph`) into the
+        fully-qualified name the graph uses. Returns None when the name cannot
+        be tied to anything, so callers can skip recording a guess.
+        """
+        if not name:
+            return None
+
+        if name in self.imports:
+            return self.imports[name]
+
+        parts = name.split(".")
+        if parts[0] in self.imports:
+            return f"{self.imports[parts[0]]}.{'.'.join(parts[1:])}"
+
+        # A class defined in this module.
+        local_candidate = f"{self.module_name}.{name}"
+        if local_candidate in self.local_symbols:
+            return local_candidate
+
+        if name in self.local_symbols:
+            return name
+
+        return None
+
+    def infer_type(self, value):
+        """Infers the type of an assigned expression, handling only the forms
+        that are unambiguous: a constructor call, or a name already known to
+        the local scope."""
+        if isinstance(value, ast.Call):
+            return self.resolve_type_name(self.get_full_attr_name(value.func))
+        if isinstance(value, ast.Name):
+            return self.lookup_variable(value.id)
+        return None
+
+    def annotation_type(self, annotation):
+        """Resolves a type annotation, unwrapping subscripts so that
+        `Optional[Database]` and `list[Database]` still name Database."""
+        if annotation is None:
+            return None
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            # Strings appear in forward references and `from __future__` files.
+            return self.resolve_type_name(annotation.value)
+        if isinstance(annotation, ast.Subscript):
+            outer = self.get_full_attr_name(annotation.value)
+            if outer and outer.split(".")[-1] in {"Optional", "List", "list", "Sequence", "Iterable", "Set", "set"}:
+                inner = annotation.slice
+                if isinstance(inner, ast.Tuple) and inner.elts:
+                    inner = inner.elts[0]
+                return self.annotation_type(inner)
+            return self.resolve_type_name(outer)
+        return self.resolve_type_name(self.get_full_attr_name(annotation))
+
+    def lookup_variable(self, name):
+        """Finds a variable's type in the innermost scope that defines it."""
+        for scope in reversed(self.scope_stack):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def record_assignment(self, target, inferred):
+        """Stores an inferred type against a simple name or a `self.attr`."""
+        if inferred is None:
+            return
+        if isinstance(target, ast.Name):
+            self.scope_stack[-1][target.id] = inferred
+        elif (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            and self.current_class
+        ):
+            self.class_attrs.setdefault(self.current_class, {})[target.attr] = inferred
+
+    def visit_Assign(self, node):
+        inferred = self.infer_type(node.value)
+        if inferred:
+            for target in node.targets:
+                self.record_assignment(target, inferred)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        inferred = self.annotation_type(node.annotation) or self.infer_type(node.value)
+        self.record_assignment(node.target, inferred)
+        self.generic_visit(node)
+
+    def collect_self_attributes(self, class_node):
+        """
+        Pre-scans a class body for `self.x = Thing()` before visiting its
+        methods. A method that uses `self.x` may be defined above the
+        `__init__` that creates it, so these cannot be learned in traversal
+        order.
+        """
+        for child in ast.walk(class_node):
+            if isinstance(child, ast.Assign):
+                inferred = self.infer_type(child.value)
+                targets = child.targets
+            elif isinstance(child, ast.AnnAssign):
+                inferred = self.annotation_type(child.annotation) or self.infer_type(child.value)
+                targets = [child.target]
+            else:
+                continue
+
+            if not inferred:
+                continue
+            for target in targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    self.class_attrs.setdefault(self.current_class, {})[target.attr] = inferred
+
     def visit_ClassDef(self, node):
         class_name = f"{self.module_name}.{node.name}"
         bases = []
@@ -130,9 +254,10 @@ class CodeASTVisitor(ast.NodeVisitor):
             
         old_class = self.current_class
         self.current_class = class_name
+        self.collect_self_attributes(node)
         self.generic_visit(node)
         self.current_class = old_class
-        
+
     def visit_FunctionDef(self, node):
         self.visit_any_function(node)
         
@@ -165,7 +290,19 @@ class CodeASTVisitor(ast.NodeVisitor):
         
         old_func = self.current_function
         self.current_function = func_name
+
+        # Parameter annotations are the other reliable source of variable
+        # types, and cost nothing to read.
+        scope = {}
+        for arg in list(node.args.args) + list(node.args.kwonlyargs):
+            annotated = self.annotation_type(arg.annotation)
+            if annotated:
+                scope[arg.arg] = annotated
+        self.scope_stack.append(scope)
+
         self.generic_visit(node)
+
+        self.scope_stack.pop()
         self.current_function = old_func
         
     def get_full_attr_name(self, node):
@@ -181,20 +318,22 @@ class CodeASTVisitor(ast.NodeVisitor):
         return None
 
     def visit_Call(self, node):
-        if not self.current_function:
-            self.generic_visit(node)
-            return
-            
+        # Calls made at module level belong to the module itself. Script-style
+        # files — Streamlit apps, main.py, settings modules — put nearly all
+        # their logic there, and skipping those calls makes such a file appear
+        # to depend on nothing at all.
+        caller = self.current_function or self.module_name
+
         called_name = self.get_full_attr_name(node.func)
         if called_name:
             resolved = self.resolve_call(called_name)
-            if resolved:
+            if resolved and resolved != caller:
                 self.edges.append({
-                    "source": self.current_function,
+                    "source": caller,
                     "target": resolved,
                     "edge_type": "calls"
                 })
-                
+
         self.generic_visit(node)
         
     def resolve_call(self, name):
@@ -204,11 +343,24 @@ class CodeASTVisitor(ast.NodeVisitor):
         if parts[0] in self.imports:
             resolved_module = self.imports[parts[0]]
             return f"{resolved_module}.{'.'.join(parts[1:])}"
-            
-        if name.startswith("self.") and self.current_class:
-            method_name = name.split(".")[1]
-            return f"{self.current_class}.{method_name}"
-            
+
+        if parts[0] == "self" and self.current_class:
+            if len(parts) == 2:
+                return f"{self.current_class}.{parts[1]}"
+            # `self.engine.run()` — resolve the attribute to its type first, so
+            # the call lands on the owning class rather than being dropped.
+            attr_type = self.class_attrs.get(self.current_class, {}).get(parts[1])
+            if attr_type:
+                return f"{attr_type}.{'.'.join(parts[2:])}"
+            return f"{self.current_class}.{parts[1]}"
+
+        # `db = Database()` ... `db.save()` — the case that string matching
+        # alone can never see.
+        if len(parts) > 1:
+            var_type = self.lookup_variable(parts[0])
+            if var_type:
+                return f"{var_type}.{'.'.join(parts[1:])}"
+
         if "." in name:
             return name
 
