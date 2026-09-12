@@ -31,6 +31,41 @@ DESCRIPTOR_DECORATORS = {
 # as an entrypoint.
 ENTRYPOINT_FUNCTION_NAMES = {"main", "cli"}
 
+# Generic containers whose subscript names the type that matters:
+# `Optional[TraceManager]` is a TraceManager as far as attribute access goes.
+UNWRAPPED_GENERICS = {
+    "Optional", "List", "list", "Set", "set", "Sequence", "Iterable",
+    "Iterator", "Awaitable", "Coroutine", "ClassVar", "Final",
+}
+
+
+def annotation_raw_name(node):
+    """
+    The type name written in an annotation, before resolution.
+
+    Unwraps the generics above so `Optional[TraceManager]` yields
+    "TraceManager". Returns None for anything with no single obvious type.
+    """
+    if node is None:
+        return None
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        inner = annotation_raw_name(node.value)
+        return f"{inner}.{node.attr}" if inner else None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        # Forward reference: `-> "SessionMemory"`.
+        return node.value
+    if isinstance(node, ast.Subscript):
+        outer = annotation_raw_name(node.value)
+        if outer and outer.split(".")[-1] in UNWRAPPED_GENERICS:
+            inner = node.slice
+            if isinstance(inner, ast.Tuple) and inner.elts:
+                inner = inner.elts[0]
+            return annotation_raw_name(inner)
+        return outer
+    return None
+
 class DefinitionVisitor(ast.NodeVisitor):
     """
     Pass 1 Visitor: Extracts all local symbols (classes, methods, functions)
@@ -42,9 +77,31 @@ class DefinitionVisitor(ast.NodeVisitor):
         self.current_function = None
         self.symbols = set()
 
+        # Collected for pass 2, which needs to know a call's return type to
+        # resolve `trace = get_current_trace()` - and needs to tell a
+        # constructor apart from a plain function returning something else.
+        self.class_symbols = set()
+        self.raw_returns = {}
+        self.imports = {}
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.imports[alias.asname or alias.name] = alias.name
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        module = node.module or ""
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            name = alias.asname or alias.name
+            self.imports[name] = f"{module}.{alias.name}" if module else alias.name
+        self.generic_visit(node)
+
     def visit_ClassDef(self, node):
         class_fqn = f"{self.module_name}.{node.name}"
         self.symbols.add(class_fqn)
+        self.class_symbols.add(class_fqn)
 
         old_class = self.current_class
         self.current_class = class_fqn
@@ -65,6 +122,10 @@ class DefinitionVisitor(ast.NodeVisitor):
         func_name = f"{parent}.{node.name}"
         self.symbols.add(func_name)
 
+        raw_return = annotation_raw_name(node.returns)
+        if raw_return:
+            self.raw_returns[func_name] = raw_return
+
         old_func = self.current_function
         self.current_function = func_name
         self.generic_visit(node)
@@ -75,9 +136,11 @@ class CodeASTVisitor(ast.NodeVisitor):
     Pass 2 Visitor: Maps structural relationships (calls, containment, imports, inherits)
     and classifies nodes against the codebase symbol table.
     """
-    def __init__(self, module_name, local_symbols):
+    def __init__(self, module_name, local_symbols, class_symbols=None, return_types=None):
         self.module_name = module_name
         self.local_symbols = local_symbols
+        self.class_symbols = class_symbols or set()
+        self.return_types = return_types or {}
         self.current_class = None
         self.current_function = None
 
@@ -104,6 +167,10 @@ class CodeASTVisitor(ast.NodeVisitor):
 
         # Call targets this visitor could not tie to any known symbol.
         self.unresolved = set()
+
+        # Name nodes sitting in the callee position of a Call, so that
+        # `foo()` is recorded once as a call and not again as a reference.
+        self.call_positions = set()
 
     @staticmethod
     def _looks_like_test_module(module_name):
@@ -243,11 +310,33 @@ class CodeASTVisitor(ast.NodeVisitor):
         return None
 
     def infer_type(self, value):
-        """Infers the type of an assigned expression, handling only the forms
-        that are unambiguous: a constructor call, or a name already known to
-        the local scope."""
+        """
+        Infers the type of an assigned expression.
+
+        A call needs care: `Database()` yields a Database, but
+        `get_current_trace()` yields whatever that function returns, not the
+        function itself. Treating every resolvable call as a constructor —
+        as this once did — types the variable as the function and makes every
+        method called on it unresolvable.
+        """
         if isinstance(value, ast.Call):
-            return self.resolve_type_name(self.get_full_attr_name(value.func))
+            callee = self.get_full_attr_name(value.func)
+            if not callee:
+                return None
+
+            resolved = self.resolve_call(callee, record_unresolved=False)
+            if resolved in self.return_types:
+                return self.return_types[resolved]
+            if resolved in self.class_symbols:
+                return resolved
+
+            # Falls back to name-shaped resolution for classes outside this
+            # codebase, where there is no symbol table to consult.
+            direct = self.resolve_type_name(callee)
+            if direct and direct not in self.local_symbols:
+                return direct
+            return None
+
         if isinstance(value, ast.Name):
             return self.lookup_variable(value.id)
         return None
@@ -446,12 +535,86 @@ class CodeASTVisitor(ast.NodeVisitor):
             return self.get_full_attr_name(node.func)
         return None
 
+    def resolve_reference(self, name):
+        """
+        Resolves a bare name to a local symbol, or None.
+
+        Deliberately stricter than resolve_call: no fallbacks and no guessing,
+        because every ordinary variable passes through here and inventing
+        targets would flood the graph.
+        """
+        if name in self.imports:
+            target = self.imports[name]
+            return target if target in self.local_symbols else None
+
+        scope = self.current_function
+        while scope:
+            candidate = f"{scope}.{name}"
+            if candidate in self.local_symbols:
+                return candidate
+            scope = scope.rsplit(".", 1)[0] if "." in scope else None
+
+        if self.current_class:
+            candidate = f"{self.current_class}.{name}"
+            if candidate in self.local_symbols:
+                return candidate
+
+        candidate = f"{self.module_name}.{name}"
+        return candidate if candidate in self.local_symbols else None
+
+    def visit_Name(self, node):
+        """
+        Records a function or class named without being called —
+        `render_login_form(handle_login)`, `handlers = {"a": run_a}`,
+        `return build`.
+
+        These are real dependencies: change the referenced function's
+        signature and the code handing it around is affected. Without them,
+        every callback looks dead.
+        """
+        if isinstance(node.ctx, ast.Load) and id(node) not in self.call_positions:
+            target = self.resolve_reference(node.id)
+            source = self.current_function or self.module_name
+            if target and target != source:
+                self.edges.append({
+                    "source": source,
+                    "target": target,
+                    "edge_type": "references",
+                })
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node):
+        """
+        Records a method handed somewhere without being called, such as
+        `FunctionTool.from_defaults(fn=self.tools.authenticate_customer)`.
+
+        Registering a bound method with a framework is how agent tools, signal
+        handlers, and callbacks are wired; without this they all read as dead.
+        """
+        if isinstance(node.ctx, ast.Load) and id(node) not in self.call_positions:
+            full = self.get_full_attr_name(node)
+            if full:
+                target = self.resolve_call(full, record_unresolved=False)
+                source = self.current_function or self.module_name
+                if target in self.local_symbols and target != source:
+                    self.edges.append({
+                        "source": source,
+                        "target": target,
+                        "edge_type": "references",
+                    })
+        self.generic_visit(node)
+
     def visit_Call(self, node):
         # Calls made at module level belong to the module itself. Script-style
         # files — Streamlit apps, main.py, settings modules — put nearly all
         # their logic there, and skipping those calls makes such a file appear
         # to depend on nothing at all.
         caller = self.current_function or self.module_name
+
+        # The callee is handled here as a call; keep the reference visitors
+        # from recording it a second time.
+        if isinstance(node.func, (ast.Name, ast.Attribute)):
+            self.call_positions.add(id(node.func))
 
         called_name = self.get_full_attr_name(node.func)
         if called_name:
@@ -465,7 +628,7 @@ class CodeASTVisitor(ast.NodeVisitor):
 
         self.generic_visit(node)
         
-    def resolve_call(self, name):
+    def resolve_call(self, name, record_unresolved=True):
         if name in self.imports:
             return self.imports[name]
         parts = name.split(".")
@@ -490,6 +653,15 @@ class CodeASTVisitor(ast.NodeVisitor):
             if var_type:
                 return f"{var_type}.{'.'.join(parts[1:])}"
 
+            # `SessionOrchestrator.helper()` — a class naming its own static
+            # or class method, or any class referenced by name rather than
+            # through an instance.
+            prefix_type = self.resolve_type_name(parts[0])
+            if prefix_type:
+                candidate = f"{prefix_type}.{'.'.join(parts[1:])}"
+                if candidate in self.local_symbols:
+                    return candidate
+
         if "." in name:
             # An attribute call on something whose type could not be inferred:
             # `mystery.save()` where mystery is an unannotated parameter. The
@@ -497,7 +669,8 @@ class CodeASTVisitor(ast.NodeVisitor):
             # unresolved rather than dressed up as a module path. Counting
             # these is what makes the parser's blind spots measurable instead
             # of invisible.
-            self.unresolved.add(name)
+            if record_unresolved:
+                self.unresolved.add(name)
             return name
 
         # Bare, unqualified call (e.g. `print(x)`, or a nested closure like
@@ -553,6 +726,9 @@ def parse_repository(root_dir):
     
     # ─── Pass 1: Collect Defined Symbols ───
     local_symbols = set()
+    class_symbols = set()
+    raw_returns = {}
+    module_imports = {}
     for root, dirs, files in os.walk(root_dir):
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for file in files:
@@ -576,8 +752,32 @@ def parse_repository(root_dir):
                     visitor = DefinitionVisitor(module_name)
                     visitor.visit(tree)
                     local_symbols.update(visitor.symbols)
+                    class_symbols.update(visitor.class_symbols)
+                    raw_returns.update(visitor.raw_returns)
+                    module_imports[module_name] = visitor.imports
                 except Exception as e:
                     print(f"Error in Pass 1 parsing for {file_path}: {e}")
+
+    # Resolve return annotations now that every module's symbols are known.
+    # A raw name like "TraceManager" means whatever it means in the module
+    # that wrote it, so each is resolved against its own module's imports.
+    return_types = {}
+    for func_fqn, raw in raw_returns.items():
+        owner = func_fqn.rsplit(".", 1)[0]
+        module_of = owner
+        while module_of and module_of not in module_imports:
+            module_of = module_of.rsplit(".", 1)[0] if "." in module_of else None
+        imports = module_imports.get(module_of, {})
+
+        resolved = None
+        if raw in imports and imports[raw] in class_symbols:
+            resolved = imports[raw]
+        elif module_of and f"{module_of}.{raw}" in class_symbols:
+            resolved = f"{module_of}.{raw}"
+        elif raw in class_symbols:
+            resolved = raw
+        if resolved:
+            return_types[func_fqn] = resolved
 
     # ─── Pass 2: Map AST Structural Call Edges & Classify Nodes ───
     all_nodes = []
@@ -604,7 +804,7 @@ def parse_repository(root_dir):
                         source = f.read()
 
                     tree = ast.parse(source, filename=file_path)
-                    visitor = CodeASTVisitor(module_name, local_symbols)
+                    visitor = CodeASTVisitor(module_name, local_symbols, class_symbols, return_types)
                     visitor.visit(tree)
 
                     # Appended after the walk: the `__main__` guard that makes

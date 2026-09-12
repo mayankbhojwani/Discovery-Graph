@@ -21,6 +21,10 @@ from database import fetch_graph_data
 DEPENDENCY_EDGES = {
     "calls": 1.0,
     "inherits": 1.0,
+    # A function handed to something else — a callback, a dispatch table
+    # entry — is a real dependency: change its signature and the code passing
+    # it around breaks.
+    "references": 0.8,
     "imports": 0.4,
 }
 

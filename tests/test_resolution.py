@@ -186,6 +186,113 @@ def test_recursive_closure_resolves_to_itself_without_an_edge(parsed):
     assert ("mod.outer.walk", "mod.outer.walk") not in call_edges(edges)
 
 
+def test_return_annotation_types_the_variable(parsed):
+    """`trace = get_current_trace()` is only resolvable by reading the
+    getter's return annotation."""
+    nodes, edges = parsed({
+        "obs.py": """
+            from typing import Optional
+
+            class TraceManager:
+                def log(self, msg): ...
+
+            def get_current_trace() -> Optional[TraceManager]:
+                return None
+        """,
+        "svc.py": """
+            from obs import get_current_trace
+
+            def work():
+                trace = get_current_trace()
+                trace.log("hello")
+        """,
+    })
+    assert ("svc.work", "obs.TraceManager.log") in call_edges(edges)
+
+
+def test_function_call_is_not_mistaken_for_a_constructor(parsed):
+    """Typing the variable as the *function* makes every method on it
+    unresolvable, so a call is only a constructor when it names a class."""
+    nodes, edges = parsed({
+        "obs.py": """
+            def make_thing():
+                return None
+        """,
+        "svc.py": """
+            from obs import make_thing
+
+            def work():
+                thing = make_thing()
+                thing.run()
+        """,
+    })
+    assert ("svc.work", "obs.make_thing.run") not in call_edges(edges)
+
+
+def test_class_qualified_call_resolves(parsed):
+    nodes, edges = parsed({
+        "mod.py": """
+            class Orchestrator:
+                @staticmethod
+                def detect(msg): ...
+
+                def process(self, msg):
+                    Orchestrator.detect(msg)
+        """,
+    })
+    assert ("mod.Orchestrator.process", "mod.Orchestrator.detect") in call_edges(edges)
+
+
+def test_function_passed_as_callback_is_a_reference(parsed):
+    """`render(handle_login)` never calls handle_login, but changing it still
+    breaks the caller - and without this every callback reads as dead."""
+    nodes, edges = parsed({
+        "ui.py": """
+            def render(callback): ...
+
+            def handle_login(): ...
+
+            def setup():
+                render(handle_login)
+        """,
+    })
+    refs = {(e["source"], e["target"]) for e in edges if e["edge_type"] == "references"}
+    assert ("ui.setup", "ui.handle_login") in refs
+
+
+def test_bound_method_passed_as_argument_is_a_reference(parsed):
+    """How agent tools and signal handlers get registered."""
+    nodes, edges = parsed({
+        "tools.py": """
+            class AgentTools:
+                def authenticate(self): ...
+
+            class Manager:
+                def __init__(self):
+                    self.tools = AgentTools()
+
+                def wire(self, register):
+                    register(fn=self.tools.authenticate)
+        """,
+    })
+    refs = {(e["source"], e["target"]) for e in edges if e["edge_type"] == "references"}
+    assert ("tools.Manager.wire", "tools.AgentTools.authenticate") in refs
+
+
+def test_ordinary_variables_do_not_become_references(parsed):
+    """Every name passes through the reference visitor; only ones resolving to
+    real local symbols may produce edges."""
+    nodes, edges = parsed({
+        "mod.py": """
+            def work(payload):
+                total = payload
+                return total
+        """,
+    })
+    refs = [e for e in edges if e["edge_type"] == "references"]
+    assert refs == []
+
+
 def test_same_class_method_call(parsed):
     nodes, edges = parsed({
         "svc.py": """
