@@ -284,14 +284,20 @@ class CodeGraph:
         return symbol in self.covered_symbols()
 
     def tests_covering(self, symbol):
-        """The specific tests whose dependencies reach `symbol`."""
+        """
+        The specific tests whose dependencies reach `symbol`.
+
+        Test modules carry the test role too, since they serve as reachability
+        roots, but naming a module as one of the tests covering a symbol is
+        noise — only the callable tests are reported.
+        """
         if symbol not in self.deps:
             return []
         tests = self.tests
         return sorted(
             item.symbol
             for item in self.impact_of(symbol, max_depth=None)
-            if item.symbol in tests
+            if item.symbol in tests and self.node_types.get(item.symbol) != "module"
         )
 
     def _parent_of(self, symbol):
@@ -338,6 +344,13 @@ class CodeGraph:
         # A method of a class whose base lies outside this codebase may be an
         # override the base calls itself.
         if parent and "external_base" in self.roles.get(parent, set()):
+            return True
+
+        # A closure defined inside a live function is typically returned or
+        # passed somewhere, and the call that eventually runs it is not
+        # visible statically. pytest fixtures returning inner builders are the
+        # everyday case.
+        if parent and self.node_types.get(parent) in {"function", "method"}:
             return True
 
         return False
@@ -406,6 +419,11 @@ class CodeGraph:
             "tests": len(self.tests),
             "covered_by_tests": sum(1 for s in local if self.is_covered(s)),
             "unreachable": len(self.unreachable()),
+            # How many call sites the parser could not tie to a symbol. The
+            # honest measure of how much of the graph is missing.
+            "unresolved_calls": sum(
+                1 for t in self.node_types.values() if t == "unresolved"
+            ),
         }
 
 

@@ -50,7 +50,8 @@ Changing db.save_user could affect 5 symbol(s):
 | `coverage <symbol>` | Which tests reach it |
 | `dead` | Symbols no entrypoint or test can reach |
 | `find <query>` | Look up a symbol's qualified name |
-| `stats` | Graph size, entrypoints, tests, coverage |
+| `index <path>` | Parse a codebase into the graph |
+| `stats` | Graph size, entrypoints, tests, coverage, unresolved calls |
 
 ### From Claude Code
 
@@ -149,9 +150,21 @@ Two more things to hold loosely:
 - **Test coverage here means reachability**, not assertion. A test that reaches a symbol may not check anything about it. It is a floor on confidence, not a measure of it.
 - **Dead code is a list of candidates**, never a delete list. An unresolved caller makes live code look dead.
 
-Measured on this repository: 92 symbols, 101 dependency edges, 10 entrypoints, 1 unreachable symbol. On networkx (580 files): 14,118 nodes and 62,143 raw edges parsed in 2.3s with zero parse errors — but only 2,026 unique local dependency edges, with 2,193 of 8,278 local symbols participating in even one. That is a realistic picture of coverage on large untyped code, and the honest reason to treat a negative result as inconclusive. Closing the gap means integrating `pyright` or `scip-python`.
+`stats` reports **`unresolved_calls`** — call sites the parser could not tie to any symbol. Those targets are typed `unresolved` rather than filed as external libraries, so the size of the blind spot is visible instead of hidden. On this repository it currently sits at 31.
+
+Measured on this repository: 149 symbols, 145 dependency edges, 13 entrypoints, 50 tests, 1 unreachable symbol. On networkx (580 files): 14,118 nodes and 62,143 raw edges parsed in 2.3s with zero parse errors — but only 2,026 unique local dependency edges, with 2,193 of 8,278 local symbols participating in even one. That is a realistic picture of coverage on large untyped code, and the honest reason to treat a negative result as inconclusive. Closing the gap means integrating `pyright` or `scip-python`.
 
 Python only.
+
+---
+
+## 🧪 Tests
+
+```bash
+.venv/bin/python -m pytest tests -q
+```
+
+41 tests covering call resolution, storage, impact queries, and reachability. Most are regressions for bugs that were found by running Epicenter on itself — the realm-collision data loss, the `test_`-prefix misclassification, closures collapsing into one node, and each of the framework-dispatch false positives in the dead-code list.
 
 ---
 
@@ -168,7 +181,6 @@ Python 3.10+ · NetworkX · SQLite · `ast` · MCP SDK · Streamlit (workbench o
 - [ ] **Context packing** — the minimal token-budgeted set of definitions needed to modify a symbol.
 - [ ] **Real name resolution** — delegate to `pyright` for what heuristics cannot reach.
 - [ ] **Subsystem detection** — community detection on the module graph, rendered as Mermaid.
-- [ ] **A test suite** — the irony of shipping dead-code detection with zero tests is noted.
 
 ---
 

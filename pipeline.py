@@ -39,29 +39,36 @@ class DefinitionVisitor(ast.NodeVisitor):
     def __init__(self, module_name):
         self.module_name = module_name
         self.current_class = None
+        self.current_function = None
         self.symbols = set()
-        
+
     def visit_ClassDef(self, node):
         class_fqn = f"{self.module_name}.{node.name}"
         self.symbols.add(class_fqn)
-        
+
         old_class = self.current_class
         self.current_class = class_fqn
         self.generic_visit(node)
         self.current_class = old_class
-        
+
     def visit_FunctionDef(self, node):
         self.visit_any_function(node)
-        
+
     def visit_AsyncFunctionDef(self, node):
         self.visit_any_function(node)
-        
+
     def visit_any_function(self, node):
-        if self.current_class:
-            self.symbols.add(f"{self.current_class}.{node.name}")
-        else:
-            self.symbols.add(f"{self.module_name}.{node.name}")
+        # Nested functions are qualified by the function enclosing them.
+        # Naming them after the enclosing class instead collapses every
+        # same-named closure in that class into one symbol.
+        parent = self.current_function or self.current_class or self.module_name
+        func_name = f"{parent}.{node.name}"
+        self.symbols.add(func_name)
+
+        old_func = self.current_function
+        self.current_function = func_name
         self.generic_visit(node)
+        self.current_function = old_func
 
 class CodeASTVisitor(ast.NodeVisitor):
     """
@@ -94,6 +101,9 @@ class CodeASTVisitor(ast.NodeVisitor):
         # and no entrypoint can reach is a dead-code candidate.
         self.module_roles = set()
         self.is_test_module = self._looks_like_test_module(module_name)
+
+        # Call targets this visitor could not tie to any known symbol.
+        self.unresolved = set()
 
     @staticmethod
     def _looks_like_test_module(module_name):
@@ -376,7 +386,13 @@ class CodeASTVisitor(ast.NodeVisitor):
         self.visit_any_function(node)
         
     def visit_any_function(self, node):
-        if self.current_class:
+        if self.current_function:
+            # A closure belongs to the function that defines it, not to the
+            # enclosing class: two same-named closures in one class are
+            # different functions and must not share a node.
+            func_name = f"{self.current_function}.{node.name}"
+            node_type = "function"
+        elif self.current_class:
             func_name = f"{self.current_class}.{node.name}"
             node_type = "method"
         else:
@@ -394,7 +410,7 @@ class CodeASTVisitor(ast.NodeVisitor):
             "roles": sorted(roles),
         })
         
-        parent = self.current_class or self.module_name
+        parent = self.current_function or self.current_class or self.module_name
         self.edges.append({
             "source": parent,
             "target": func_name,
@@ -475,6 +491,13 @@ class CodeASTVisitor(ast.NodeVisitor):
                 return f"{var_type}.{'.'.join(parts[1:])}"
 
         if "." in name:
+            # An attribute call on something whose type could not be inferred:
+            # `mystery.save()` where mystery is an unannotated parameter. The
+            # call is real, so the edge is kept, but the target is recorded as
+            # unresolved rather than dressed up as a module path. Counting
+            # these is what makes the parser's blind spots measurable instead
+            # of invisible.
+            self.unresolved.add(name)
             return name
 
         # Bare, unqualified call (e.g. `print(x)`, or a nested closure like
@@ -484,6 +507,16 @@ class CodeASTVisitor(ast.NodeVisitor):
         # before falling back to assuming a module-level symbol.
         if is_builtin_name(name):
             return name
+
+        # Walk outwards through the enclosing scopes: a closure calls its
+        # sibling closure, or itself, by bare name, and those live under the
+        # defining function rather than the module.
+        scope = self.current_function
+        while scope:
+            candidate = f"{scope}.{name}"
+            if candidate in self.local_symbols:
+                return candidate
+            scope = scope.rsplit(".", 1)[0] if "." in scope else None
 
         if self.current_class:
             class_candidate = f"{self.current_class}.{name}"
@@ -550,6 +583,7 @@ def parse_repository(root_dir):
     all_nodes = []
     all_edges = []
     star_imports_map = {}
+    all_unresolved = set()
     
     for root, dirs, files in os.walk(root_dir):
         dirs[:] = [d for d in dirs if d not in exclude_dirs]
@@ -587,6 +621,7 @@ def parse_repository(root_dir):
 
                     all_nodes.extend(visitor.nodes)
                     all_edges.extend(visitor.edges)
+                    all_unresolved |= visitor.unresolved
                     if visitor.star_imports:
                         star_imports_map[module_name] = visitor.star_imports
                 except Exception as e:
@@ -631,6 +666,11 @@ def parse_repository(root_dir):
             elif is_builtin_name(target):
                 node_type = "builtin"
                 summary = "Python runtime built-in function or collection method"
+            elif target in all_unresolved:
+                # A call on a value whose type could not be inferred. Recorded
+                # so the gap is countable rather than misfiled as a dependency.
+                node_type = "unresolved"
+                summary = "Call target that static resolution could not identify"
             else:
                 node_type = "external_library"
                 summary = "External dependency or package import reference"
