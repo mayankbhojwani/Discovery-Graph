@@ -31,12 +31,60 @@ DESCRIPTOR_DECORATORS = {
 # as an entrypoint.
 ENTRYPOINT_FUNCTION_NAMES = {"main", "cli"}
 
+# Fixture and lifecycle hooks a test runner invokes directly.
+TEST_LIFECYCLE_NAMES = {
+    "setUp", "tearDown", "setUpClass", "tearDownClass",
+    "setUpModule", "tearDownModule",
+    "setup_method", "teardown_method", "setup_class", "teardown_class",
+    "setup_module", "teardown_module", "setup_function", "teardown_function",
+}
+
 # Generic containers whose subscript names the type that matters:
 # `Optional[TraceManager]` is a TraceManager as far as attribute access goes.
 UNWRAPPED_GENERICS = {
     "Optional", "List", "list", "Set", "set", "Sequence", "Iterable",
     "Iterator", "Awaitable", "Coroutine", "ClassVar", "Final",
 }
+
+
+def is_environment_dir(path):
+    """
+    True for a virtualenv or conda environment.
+
+    Name matching alone is not enough: environments get called anything —
+    autogen-env, .direnv, myproject-venv — and indexing one silently floods
+    the graph with thousands of third-party symbols. These markers are what
+    the tools themselves write, so they hold whatever the directory is named.
+    """
+    return (
+        os.path.isfile(os.path.join(path, "pyvenv.cfg"))        # stdlib venv
+        or os.path.isdir(os.path.join(path, "conda-meta"))      # conda
+        or os.path.isdir(os.path.join(path, "site-packages"))   # bare prefix
+    )
+
+
+def absolute_import_module(module_name, is_package, node):
+    """
+    Turns a relative import into the module it actually names.
+
+    `from .base_test import X` inside a.b.tests.test_mixing means
+    a.b.tests.base_test; reading node.module alone yields "base_test" and the
+    symbol never resolves. Package-structured projects use these everywhere.
+    """
+    if not node.level:
+        return node.module or ""
+
+    parts = module_name.split(".")
+    if not is_package:
+        parts = parts[:-1]          # a module resolves against its package
+    climb = node.level - 1
+    if climb:
+        parts = parts[:-climb] if climb < len(parts) else []
+
+    base = ".".join(parts)
+    if node.module:
+        return f"{base}.{node.module}" if base else node.module
+    return base
 
 
 def annotation_raw_name(node):
@@ -71,8 +119,9 @@ class DefinitionVisitor(ast.NodeVisitor):
     Pass 1 Visitor: Extracts all local symbols (classes, methods, functions)
     defined within a module to build the codebase symbol table.
     """
-    def __init__(self, module_name):
+    def __init__(self, module_name, is_package=False):
         self.module_name = module_name
+        self.is_package = is_package
         self.current_class = None
         self.current_function = None
         self.symbols = set()
@@ -90,7 +139,7 @@ class DefinitionVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-        module = node.module or ""
+        module = absolute_import_module(self.module_name, self.is_package, node)
         for alias in node.names:
             if alias.name == "*":
                 continue
@@ -136,8 +185,10 @@ class CodeASTVisitor(ast.NodeVisitor):
     Pass 2 Visitor: Maps structural relationships (calls, containment, imports, inherits)
     and classifies nodes against the codebase symbol table.
     """
-    def __init__(self, module_name, local_symbols, class_symbols=None, return_types=None):
+    def __init__(self, module_name, local_symbols, class_symbols=None, return_types=None,
+                 is_package=False):
         self.module_name = module_name
+        self.is_package = is_package
         self.local_symbols = local_symbols
         self.class_symbols = class_symbols or set()
         self.return_types = return_types or {}
@@ -204,9 +255,10 @@ class CodeASTVisitor(ast.NodeVisitor):
         if self.is_test_module:
             if name.startswith("test"):
                 roles.add("test")
-            elif is_method and self.current_class and self.current_class.split(".")[-1].startswith("Test"):
-                if name in {"setUp", "tearDown", "setup_method", "teardown_method"}:
-                    roles.add("test")
+            elif name in TEST_LIFECYCLE_NAMES:
+                # The runner calls these itself, and they appear on shared
+                # base classes that are not named Test* at all.
+                roles.add("test")
         if "fixture" in decorators:
             roles.add("test")
 
@@ -249,7 +301,7 @@ class CodeASTVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         
     def visit_ImportFrom(self, node):
-        module = node.module or ""
+        module = absolute_import_module(self.module_name, self.is_package, node)
         for alias in node.names:
             if alias.name == "*":
                 self.star_imports.append(module)
@@ -722,7 +774,20 @@ def parse_repository(root_dir):
     1. Pass 1: Crawl all source files and compile a global local_symbols table.
     2. Pass 2: Traverse files to map architectural calls, resolve star-imports, and classify node types.
     """
-    exclude_dirs = {".git", "__pycache__", "venv", ".venv", "env", ".agents", "scratch"}
+    # Indexing a package directory directly (networkx/, or the common
+    # src/mypackage/) would otherwise drop the package's own name, so the
+    # code's absolute self-imports never match the symbols parsed from it.
+    package_prefix = (
+        [os.path.basename(os.path.normpath(root_dir))]
+        if os.path.isfile(os.path.join(root_dir, "__init__.py"))
+        else []
+    )
+
+    exclude_dirs = {
+        ".git", "__pycache__", ".agents", "scratch", "node_modules",
+        ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+        "site-packages", "build", "dist", ".eggs",
+    }
     
     # ─── Pass 1: Collect Defined Symbols ───
     local_symbols = set()
@@ -730,15 +795,21 @@ def parse_repository(root_dir):
     raw_returns = {}
     module_imports = {}
     for root, dirs, files in os.walk(root_dir):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        dirs[:] = [
+            d for d in dirs
+            if d not in exclude_dirs
+            and not is_environment_dir(os.path.join(root, d))
+        ]
         for file in files:
             if file.endswith(".py"):
                 file_path = os.path.join(root, file)
                 
                 rel_path = os.path.relpath(file_path, root_dir)
                 module_parts = rel_path[:-3].replace(os.sep, ".").split(".")
-                if module_parts[-1] == "__init__":
+                is_package = module_parts[-1] == "__init__"
+                if is_package:
                     module_parts.pop()
+                module_parts = package_prefix + module_parts
                 module_name = ".".join(module_parts)
                 if not module_name:
                     module_name = file[:-3]
@@ -749,7 +820,7 @@ def parse_repository(root_dir):
                     with open(file_path, "r", encoding="utf-8") as f:
                         source = f.read()
                     tree = ast.parse(source, filename=file_path)
-                    visitor = DefinitionVisitor(module_name)
+                    visitor = DefinitionVisitor(module_name, is_package)
                     visitor.visit(tree)
                     local_symbols.update(visitor.symbols)
                     class_symbols.update(visitor.class_symbols)
@@ -784,17 +855,25 @@ def parse_repository(root_dir):
     all_edges = []
     star_imports_map = {}
     all_unresolved = set()
+    explicit_exports = set()
+    star_exports = set()
     
     for root, dirs, files in os.walk(root_dir):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        dirs[:] = [
+            d for d in dirs
+            if d not in exclude_dirs
+            and not is_environment_dir(os.path.join(root, d))
+        ]
         for file in files:
             if file.endswith(".py"):
                 file_path = os.path.join(root, file)
                 
                 rel_path = os.path.relpath(file_path, root_dir)
                 module_parts = rel_path[:-3].replace(os.sep, ".").split(".")
-                if module_parts[-1] == "__init__":
+                is_package = module_parts[-1] == "__init__"
+                if is_package:
                     module_parts.pop()
+                module_parts = package_prefix + module_parts
                 module_name = ".".join(module_parts)
                 if not module_name:
                     module_name = file[:-3]
@@ -804,7 +883,8 @@ def parse_repository(root_dir):
                         source = f.read()
 
                     tree = ast.parse(source, filename=file_path)
-                    visitor = CodeASTVisitor(module_name, local_symbols, class_symbols, return_types)
+                    visitor = CodeASTVisitor(module_name, local_symbols, class_symbols,
+                                             return_types, is_package)
                     visitor.visit(tree)
 
                     # Appended after the walk: the `__main__` guard that makes
@@ -824,6 +904,14 @@ def parse_repository(root_dir):
                     all_unresolved |= visitor.unresolved
                     if visitor.star_imports:
                         star_imports_map[module_name] = visitor.star_imports
+
+                    # A package's __init__ re-exports are its public surface.
+                    # For a library that surface IS the entrypoint: callers
+                    # live outside the codebase, so without this every public
+                    # function reads as dead.
+                    if is_package:
+                        explicit_exports.update(visitor.imports.values())
+                        star_exports.update(visitor.star_imports)
                 except Exception as e:
                     print(f"Error in Pass 2 parsing for {file_path}: {e}")
                     
@@ -851,6 +939,18 @@ def parse_repository(root_dir):
             added_titles.add(node["title"])
             final_nodes.append(node)
             
+    # Mark public exports as entrypoints. A star-exported module publishes
+    # everything defined directly inside it.
+    public = {e for e in explicit_exports if e in local_symbols}
+    if star_exports:
+        for symbol in local_symbols:
+            owner = symbol.rsplit(".", 1)[0] if "." in symbol else None
+            if owner in star_exports:
+                public.add(symbol)
+    for node in final_nodes:
+        if node["title"] in public and "entrypoint" not in node["roles"]:
+            node["roles"] = sorted(set(node["roles"]) | {"entrypoint"})
+
     # Resolve node_type for target edges not yet defined in final_nodes
     for edge in all_edges:
         target = edge["target"]
