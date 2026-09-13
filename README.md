@@ -156,7 +156,7 @@ Libraries need one more root. Their callers live outside the codebase entirely, 
 
 Resolution is heuristic, not a type checker. It is **incomplete, and errors run toward under-reporting**: a listed caller is reliable, but *"nothing depends on this"* is the answer to distrust.
 
-Resolved: constructor assignments, parameter and return annotations, `self` attributes, closures, class-qualified calls, callbacks and bound-method references, relative imports, and package re-exports.
+Resolved: constructor assignments, parameter and return annotations, `X | None` unions, class-body annotations (dataclass, pydantic, attrs), `self` attributes and attributes read into locals, async methods and awaited calls, closures, class-qualified calls, callbacks and bound-method references, relative imports, and package re-exports.
 
 Not resolved:
 
@@ -176,14 +176,13 @@ Python only.
 
 ### Measured
 
-| | This repo | A 2,700-line app | networkx (580 files) |
-|---|---|---|---|
-| Symbols | 171 | 126 | 8,337 |
-| Dependency edges | 187 | 293 | 13,446 |
-| Tests detected | 64 | 27 | 5,227 |
-| Dead-code candidates | 1 | 3 | 7 |
-| Unresolved calls | 40 | 14 | 817 |
-| Index time | <0.1s | 0.3s | 3s |
+| | This repo | A 2,700-line app | mcp SDK (123 files) | networkx (580 files) |
+|---|---|---|---|---|
+| Symbols | 171 | 126 | 1,407 | 8,337 |
+| Dependency edges | 248 | 293 | 2,905 | 13,447 |
+| Dead-code candidates | 1 | 3 | 42 | 7 |
+| Unresolved calls | 48 | 14 | 134 | 833 |
+| Index time | <0.1s | 0.3s | 0.7s | 3s |
 
 Every one of those dead-code numbers started far higher. On the application it was 25, on networkx 581. Each round of checking the false positives by hand exposed a distinct gap — callbacks passed but never called, return annotations, relative imports, a package losing its own name, and same-module inheritance building its edge from the import map alone. Running it against code neither of us wrote found far more than self-analysis ever did.
 
@@ -199,7 +198,7 @@ The 7 that survive on networkx are backend-interface methods and test helpers re
 .venv/bin/python -m pytest tests -q
 ```
 
-68 tests covering call resolution, storage, impact queries, reachability, package layout, dynamic dispatch, and history mining. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
+72 tests covering call resolution, storage, impact queries, reachability, package layout, dynamic dispatch, and history mining. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
 
 ---
 

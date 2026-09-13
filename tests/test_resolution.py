@@ -293,6 +293,90 @@ def test_ordinary_variables_do_not_become_references(parsed):
     assert refs == []
 
 
+def test_pep604_union_annotation(parsed):
+    """`Cache | None` is the modern spelling of Optional[Cache] and parses as
+    a BinOp rather than a Subscript. Typed code uses it everywhere."""
+    nodes, edges = parsed({
+        "store.py": """
+            class Cache:
+                def read(self, k): ...
+        """,
+        "svc.py": """
+            from store import Cache
+
+            def work(cache: Cache | None, k):
+                cache.read(k)
+        """,
+    })
+    assert ("svc.work", "store.Cache.read") in call_edges(edges)
+
+
+def test_class_body_annotation_types_the_attribute(parsed):
+    """Dataclasses, pydantic models and attrs classes declare their state as
+    class-body annotations and never write `self.x = ...` at all."""
+    nodes, edges = parsed({
+        "store.py": """
+            class Cache:
+                def read(self, k): ...
+        """,
+        "svc.py": """
+            from store import Cache
+
+            class Client:
+                cache: Cache
+
+                def fetch(self, k):
+                    self.cache.read(k)
+        """,
+    })
+    assert ("svc.Client.fetch", "store.Cache.read") in call_edges(edges)
+
+
+def test_attribute_read_into_a_local_keeps_its_type(parsed):
+    """`cache = self.cache` - the type is known, and must survive the hop
+    through a local or every call on it goes unresolved."""
+    nodes, edges = parsed({
+        "store.py": """
+            class Cache:
+                def read(self, k): ...
+        """,
+        "svc.py": """
+            from store import Cache
+
+            class Client:
+                cache: Cache | None = None
+
+                def fetch(self, k):
+                    cache = self.cache
+                    return cache.read(k)
+        """,
+    })
+    assert ("svc.Client.fetch", "store.Cache.read") in call_edges(edges)
+
+
+def test_async_methods_and_awaited_calls_resolve(parsed):
+    """Async code was never exercised until an async-heavy codebase was
+    analysed; `await x.method()` must resolve like any other call."""
+    nodes, edges = parsed({
+        "store.py": """
+            class Cache:
+                async def read(self, k): ...
+        """,
+        "svc.py": """
+            from store import Cache
+
+            class Client:
+                def __init__(self):
+                    self.cache = Cache()
+
+                async def fetch(self, k):
+                    return await self.cache.read(k)
+        """,
+    })
+    assert ("svc.Client.fetch", "store.Cache.read") in call_edges(edges)
+    assert "svc.Client.fetch" in {n["title"] for n in nodes}
+
+
 def test_same_class_method_call(parsed):
     nodes, edges = parsed({
         "svc.py": """

@@ -138,6 +138,18 @@ def annotation_raw_name(node):
                 inner = inner.elts[0]
             return annotation_raw_name(inner)
         return outer
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        # PEP 604: `Cache | None` is the modern spelling of Optional[Cache],
+        # and reads as a BinOp rather than a Subscript. Typed code uses it
+        # everywhere, so missing it loses most attribute types in such a
+        # codebase.
+        for side in (node.left, node.right):
+            if isinstance(side, ast.Constant) and side.value is None:
+                continue
+            name = annotation_raw_name(side)
+            if name:
+                return name
+        return None
     return None
 
 class DefinitionVisitor(ast.NodeVisitor):
@@ -427,25 +439,29 @@ class CodeASTVisitor(ast.NodeVisitor):
 
         if isinstance(value, ast.Name):
             return self.lookup_variable(value.id)
+
+        if isinstance(value, ast.Attribute):
+            # `cache = self._cache` - reading a typed attribute into a local.
+            # Without this the attribute's type is known but stops at the
+            # assignment, and every call on the local goes unresolved.
+            parts = (self.get_full_attr_name(value) or "").split(".")
+            if len(parts) == 2 and parts[0] == "self" and self.current_class:
+                return self.class_attrs.get(self.current_class, {}).get(parts[1])
+            if len(parts) > 1:
+                base = self.lookup_variable(parts[0])
+                if base:
+                    return self.class_attrs.get(base, {}).get(parts[1])
         return None
 
     def annotation_type(self, annotation):
-        """Resolves a type annotation, unwrapping subscripts so that
-        `Optional[Database]` and `list[Database]` still name Database."""
-        if annotation is None:
-            return None
-        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-            # Strings appear in forward references and `from __future__` files.
-            return self.resolve_type_name(annotation.value)
-        if isinstance(annotation, ast.Subscript):
-            outer = self.get_full_attr_name(annotation.value)
-            if outer and outer.split(".")[-1] in {"Optional", "List", "list", "Sequence", "Iterable", "Set", "set"}:
-                inner = annotation.slice
-                if isinstance(inner, ast.Tuple) and inner.elts:
-                    inner = inner.elts[0]
-                return self.annotation_type(inner)
-            return self.resolve_type_name(outer)
-        return self.resolve_type_name(self.get_full_attr_name(annotation))
+        """
+        Resolves a type annotation to a fully-qualified symbol.
+
+        Reading the annotation is shared with pass 1 rather than reimplemented
+        here: keeping two parsers in step failed silently once already, when
+        `X | None` was taught to one of them and not the other.
+        """
+        return self.resolve_type_name(annotation_raw_name(annotation))
 
     def lookup_variable(self, name):
         """Finds a variable's type in the innermost scope that defines it."""
@@ -487,6 +503,21 @@ class CodeASTVisitor(ast.NodeVisitor):
         `__init__` that creates it, so these cannot be learned in traversal
         order.
         """
+        # Class-body annotations: `cache: ClientResponseCache | None = ...`.
+        # Dataclasses, pydantic models and attrs classes declare their state
+        # this way and never write `self.cache = ...` at all, so scanning only
+        # for self-assignment misses every attribute they have. Only direct
+        # children of the class body count - the same syntax inside a method
+        # is an ordinary local variable.
+        for child in class_node.body:
+            if (
+                isinstance(child, ast.AnnAssign)
+                and isinstance(child.target, ast.Name)
+            ):
+                inferred = self.annotation_type(child.annotation)
+                if inferred:
+                    self.class_attrs.setdefault(self.current_class, {})[child.target.id] = inferred
+
         for child in ast.walk(class_node):
             if isinstance(child, ast.Assign):
                 inferred = self.infer_type(child.value)
