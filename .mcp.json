@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "epicenter": {
-      "command": ".venv/bin/python",
-      "args": ["mcp_server.py"]
+      "command": ".venv/bin/epicenter-mcp"
     }
   }
 }

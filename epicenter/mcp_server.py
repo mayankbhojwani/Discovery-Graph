@@ -15,8 +15,8 @@ import sqlite3
 
 from mcp.server.mcpserver import MCPServer
 
-from epicenter import CodeGraph
-from pipeline import ingest_codebase
+from .graph import CodeGraph
+from .pipeline import ingest_codebase
 
 DB_PATH = os.environ.get("EPICENTER_DB", "epicenter.db")
 
@@ -356,5 +356,11 @@ def find_symbol(query: str, codebase: str = "") -> str:
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
+def main():
+    """Console entry point, so an MCP client can launch the server by name
+    rather than needing a path into somebody's virtualenv."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

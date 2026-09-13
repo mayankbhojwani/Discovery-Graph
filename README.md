@@ -21,14 +21,14 @@ That precision is the product. The graph is the means.
 ## 🚀 Quick start
 
 ```bash
-python3 -m venv .venv && .venv/bin/python -m pip install -e .
+pip install epicenter-mcp
 ```
 
 Index a codebase, then ask:
 
 ```bash
-.venv/bin/epicenter index /path/to/repo
-.venv/bin/epicenter impact save_user
+epicenter index /path/to/repo
+epicenter impact save_user
 ```
 
 With more than one codebase indexed, name which to query: `--realm /path/to/repo`.
@@ -59,7 +59,17 @@ Changing db.save_user could affect 5 symbol(s):
 
 ### From Claude Code
 
-[`.mcp.json`](.mcp.json) registers the server for this project — restart Claude Code and approve it. Then ask in plain language: *"what breaks if I change fetch_graph_data?"*
+Add this to `.mcp.json` in any project, restart Claude Code, and approve it:
+
+```json
+{
+  "mcpServers": {
+    "epicenter": { "command": "epicenter-mcp" }
+  }
+}
+```
+
+Then ask in plain language: *"what breaks if I change fetch_graph_data?"*
 
 Tools: `impact_of`, `test_coverage`, `change_coupling`, `dead_code`, `dependencies_of`, `find_symbol`, `index_codebase`, `list_codebases`.
 
@@ -69,11 +79,12 @@ Tools: `impact_of`, `test_coverage`, `change_coupling`, `dead_code`, `dependenci
 
 ```mermaid
 graph TD
-    Src[Python source tree] -->|two-pass AST walk| PL[Parser - pipeline.py]
-    PL -->|nodes, edges, roles| DB[(SQLite cache - database.py)]
-    DB --> IM[Dependency graph - epicenter.py]
-    IM --> Q[impact / coverage / dead]
-    Q --> MCP[MCP server - mcp_server.py]
+    Src[Python source tree] -->|two-pass AST walk| PL[Parser - pipeline]
+    PL -->|nodes, edges, roles| DB[(SQLite cache - database)]
+    Git[(git history)] -->|co-change - cochange| DB
+    DB --> IM[Dependency graph - graph]
+    IM --> Q[impact / coverage / dead / coupling]
+    Q --> MCP[MCP server - mcp_server]
     Q --> CLI[epicenter CLI]
     MCP -->|tools| AI[Claude Code / any MCP client]
     DB --> EG[Path ranking - engine.py]
@@ -82,13 +93,24 @@ graph TD
 
 | Module | Role |
 |---|---|
-| [`pipeline.py`](pipeline.py) | Two-pass AST parser. Symbols, call resolution, role detection. |
-| [`database.py`](database.py) | Realm-scoped SQLite cache. |
-| [`epicenter.py`](epicenter.py) | Dependency graph, impact/coverage/reachability queries, CLI. |
-| [`cochange.py`](cochange.py) | Change coupling mined from git history. |
-| [`mcp_server.py`](mcp_server.py) | The queries as MCP tools. |
-| [`engine.py`](engine.py) | Centrality-based path ranking (earlier direction, retained). |
+| [`epicenter/pipeline.py`](epicenter/pipeline.py) | Two-pass AST parser. Symbols, call resolution, role detection. |
+| [`epicenter/database.py`](epicenter/database.py) | Realm-scoped SQLite cache. |
+| [`epicenter/graph.py`](epicenter/graph.py) | Dependency graph and the impact/coverage/reachability queries. |
+| [`epicenter/cochange.py`](epicenter/cochange.py) | Change coupling mined from git history. |
+| [`epicenter/cli.py`](epicenter/cli.py) | Command line interface. |
+| [`epicenter/mcp_server.py`](epicenter/mcp_server.py) | The queries as MCP tools. |
+| [`epicenter/engine.py`](epicenter/engine.py) | Centrality-based path ranking (earlier direction, retained). |
 | [`app.py`](app.py) | Streamlit workbench over `engine.py`. |
+
+Everything ships inside the `epicenter` package. Its module names — `database`, `pipeline`, `engine` — are generic enough that installing them at the top level would shadow whatever else in a user's environment claims them.
+
+### Developing on it
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pytest tests -q
+```
 
 ---
 
@@ -198,10 +220,16 @@ The 7 that survive on networkx are backend-interface methods and test helpers re
 ## 🧪 Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q
+pytest tests -q
 ```
 
 74 tests covering call resolution, storage, impact queries, reachability, package layout, dynamic dispatch, and history mining. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
+
+---
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).
 
 ---
 

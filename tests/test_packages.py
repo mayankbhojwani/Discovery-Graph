@@ -8,7 +8,7 @@ than against flat single-directory samples.
 
 import os
 
-from pipeline import parse_repository
+from epicenter.pipeline import parse_repository
 from tests.conftest import call_edges, roles_of
 
 

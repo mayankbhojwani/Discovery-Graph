@@ -1,7 +1,7 @@
 import os
 import ast
 import builtins
-from database import save_code_graph_to_db
+from .database import save_code_graph_to_db
 
 # Extract standard Python built-in names
 BUILTIN_NAMES = set(dir(builtins))

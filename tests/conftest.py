@@ -12,7 +12,7 @@ import textwrap
 import pytest
 
 from epicenter import CodeGraph
-from pipeline import ingest_codebase, parse_repository
+from epicenter.pipeline import ingest_codebase, parse_repository
 
 
 def _write(root, files):

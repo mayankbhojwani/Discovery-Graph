@@ -399,7 +399,7 @@ def test_calling_the_instance_itself_does_not_crash(parsed):
 def test_a_file_that_fails_to_parse_is_reported(parsed, project):
     """A dropped file takes all its symbols with it, so the failure must be
     visible rather than swallowed."""
-    from pipeline import parse_repository
+    from epicenter.pipeline import parse_repository
 
     root = project({
         "good.py": "def works(): ...\n",

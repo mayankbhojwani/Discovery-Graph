@@ -9,9 +9,9 @@ import subprocess
 
 import pytest
 
-from cochange import analyze_history, ingest_history
+from epicenter.cochange import analyze_history, ingest_history
 from epicenter import CodeGraph
-from pipeline import ingest_codebase
+from epicenter.pipeline import ingest_codebase
 
 
 def git(root, *args):

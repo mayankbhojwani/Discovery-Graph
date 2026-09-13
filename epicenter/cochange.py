@@ -16,8 +16,8 @@ import os
 import subprocess
 from collections import Counter, defaultdict
 
-from database import save_cochange_to_db
-from pipeline import DefinitionVisitor, module_name_for, package_prefix_for
+from .database import save_cochange_to_db
+from .pipeline import DefinitionVisitor, module_name_for, package_prefix_for
 
 DEFAULT_MAX_COMMITS = 500
 

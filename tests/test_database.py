@@ -5,8 +5,8 @@ Both cases here are regressions for bugs that lost data silently: no error,
 no warning, just missing rows that made later analysis quietly wrong.
 """
 
-from database import fetch_graph_data
-from pipeline import ingest_codebase
+from epicenter.database import fetch_graph_data
+from epicenter.pipeline import ingest_codebase
 
 SHARED_NAME = {
     "app.py": """

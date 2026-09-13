@@ -1,8 +1,27 @@
 [project]
-name = "epicenter"
+name = "epicenter-mcp"
 version = "0.1.0"
-description = "Name a symbol; see everything that shakes. Codebase impact analysis over MCP."
+description = "Name a symbol; see everything that shakes. Python impact analysis over MCP."
+readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mayank Bhojwani", email = "mayankbhojwani7@gmail.com" }]
+keywords = [
+    "static-analysis", "call-graph", "impact-analysis", "dead-code",
+    "mcp", "dependency-graph", "refactoring",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "networkx",
     "mcp[cli]",
@@ -10,13 +29,23 @@ dependencies = [
 
 [project.optional-dependencies]
 workbench = ["streamlit"]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/mayankbhojwani/Code-Reviewer-MCP"
+Repository = "https://github.com/mayankbhojwani/Code-Reviewer-MCP"
+Issues = "https://github.com/mayankbhojwani/Code-Reviewer-MCP/issues"
 
 [project.scripts]
-epicenter = "epicenter:main"
+epicenter = "epicenter.cli:main"
+epicenter-mcp = "epicenter.mcp_server:main"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["epicenter", "pipeline", "database", "cochange", "mcp_server", "engine"]
+# Only the epicenter package ships. The modules inside it have deliberately
+# generic names (database, pipeline, engine); installed at the top level they
+# would shadow anything else claiming those names in a user's environment.
+[tool.setuptools.packages.find]
+include = ["epicenter*"]

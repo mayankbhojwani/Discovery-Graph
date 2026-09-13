@@ -1,5 +1,5 @@
 import networkx as nx
-from database import fetch_graph_data
+from .database import fetch_graph_data
 
 class CuriosityEngine:
     def __init__(self, db_path="epicenter.db", realm=None):

@@ -2,9 +2,9 @@ import streamlit as st
 import time
 import sqlite3
 import os
-from database import initialize_db
-from engine import CuriosityEngine
-from pipeline import ingest_codebase
+from epicenter.database import initialize_db
+from epicenter.engine import CuriosityEngine
+from epicenter.pipeline import ingest_codebase
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
