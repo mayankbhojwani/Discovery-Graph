@@ -765,6 +765,12 @@ class CodeASTVisitor(ast.NodeVisitor):
             return f"{resolved_module}.{'.'.join(parts[1:])}"
 
         if parts[0] == "self" and self.current_class:
+            if len(parts) == 1:
+                # `self(...)` - calling the instance itself, which runs the
+                # class's __call__. Resolved to the class, the same way a
+                # constructor call is. Without this the parts[1] below raises
+                # and the whole file is lost.
+                return self.current_class
             if len(parts) == 2:
                 return f"{self.current_class}.{parts[1]}"
             # `self.engine.run()` — resolve the attribute to its type first, so
@@ -862,6 +868,12 @@ def parse_repository(root_dir):
     }
     
     # ─── Pass 1: Collect Defined Symbols ───
+    # A file that fails to parse contributes nothing at all - every symbol
+    # in it vanishes from the graph. Surfaced rather than printed and
+    # forgotten, because silently losing a file quietly corrupts every
+    # answer that follows.
+    parse_failures = []
+
     local_symbols = set()
     class_symbols = set()
     raw_returns = {}
@@ -892,7 +904,7 @@ def parse_repository(root_dir):
                     raw_returns.update(visitor.raw_returns)
                     module_imports[module_name] = visitor.imports
                 except Exception as e:
-                    print(f"Error in Pass 1 parsing for {file_path}: {e}")
+                    parse_failures.append((file_path, "pass 1", str(e)))
 
     # Resolve return annotations now that every module's symbols are known.
     # A raw name like "TraceManager" means whatever it means in the module
@@ -971,7 +983,7 @@ def parse_repository(root_dir):
                         explicit_exports.update(visitor.imports.values())
                         star_exports.update(visitor.star_imports)
                 except Exception as e:
-                    print(f"Error in Pass 2 parsing for {file_path}: {e}")
+                    parse_failures.append((file_path, "pass 2", str(e)))
                     
     # Post-Parse Star Imports Resolution
     for edge in all_edges:
@@ -1051,6 +1063,7 @@ def parse_repository(root_dir):
                 "roles": [],
             })
             
+    parse_repository.last_failures = parse_failures
     return final_nodes, all_edges
 
 def ingest_codebase(repo_path, db_path="epicenter.db"):

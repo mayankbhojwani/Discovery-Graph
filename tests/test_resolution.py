@@ -377,6 +377,43 @@ def test_async_methods_and_awaited_calls_resolve(parsed):
     assert "svc.Client.fetch" in {n["title"] for n in nodes}
 
 
+def test_calling_the_instance_itself_does_not_crash(parsed):
+    """`self(...)` runs the class's __call__. It once raised IndexError deep
+    in resolve_call, and the exception was caught per-file - so every symbol
+    in any file containing this pattern vanished from the graph silently."""
+    nodes, edges = parsed({
+        "mod.py": """
+            class Handler:
+                def __call__(self, x): ...
+
+                def run(self, x):
+                    return self(x)
+        """,
+    })
+    titles = {n["title"] for n in nodes}
+    assert "mod.Handler.run" in titles
+    assert "mod.Handler.__call__" in titles
+    assert ("mod.Handler.run", "mod.Handler") in call_edges(edges)
+
+
+def test_a_file_that_fails_to_parse_is_reported(parsed, project):
+    """A dropped file takes all its symbols with it, so the failure must be
+    visible rather than swallowed."""
+    from pipeline import parse_repository
+
+    root = project({
+        "good.py": "def works(): ...\n",
+        "broken.py": "def oops(:\n",
+    })
+    nodes, _ = parse_repository(str(root))
+
+    # A syntax error trips both passes, so the file appears once per pass.
+    failed_files = {path for path, _phase, _message in parse_repository.last_failures}
+    assert len(failed_files) == 1
+    assert "broken.py" in failed_files.pop()
+    assert "good.works" in {n["title"] for n in nodes}
+
+
 def test_same_class_method_call(parsed):
     nodes, edges = parsed({
         "svc.py": """

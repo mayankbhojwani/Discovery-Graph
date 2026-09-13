@@ -638,10 +638,26 @@ def main():
             print(f"No Python files or no relationships found in {target}.")
             sys.exit(1)
 
+        from pipeline import parse_repository
+        failures = getattr(parse_repository, "last_failures", [])
+
         stats = CodeGraph(db_path=args.db, realm=target).stats()
         print(f"Indexed {target}")
         for key in ("symbols", "dependency_edges", "entrypoints", "tests", "unreachable"):
             print(f"  {key:20} {stats[key]}")
+
+        if failures:
+            # Every symbol in an unparsed file is missing from the graph, so
+            # this is never a detail to bury. Reported per file: a syntax
+            # error trips both passes and would otherwise be listed twice.
+            by_file = {}
+            for path, _phase, message in failures:
+                by_file.setdefault(path, message)
+            print(f"\n  {len(by_file)} file(s) FAILED TO PARSE - their symbols are absent:")
+            for path, message in list(by_file.items())[:5]:
+                print(f"    {os.path.basename(path)}: {message}")
+            if len(by_file) > 5:
+                print(f"    ... and {len(by_file) - 5} more")
         return
 
     if args.command == "history":

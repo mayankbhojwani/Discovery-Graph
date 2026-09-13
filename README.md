@@ -164,6 +164,9 @@ Not resolved:
 - **Containers** — `handlers = [Foo()]` then `handlers[0].run()`
 - **Reassignment** — last-write-wins, so a variable changing type mid-function records wrong
 - **Duck typing** — same ceiling
+- **Runtime reflection** — `getattr(self, f'{key}_schema')` builds a method name from a string. Nothing static can follow it; pydantic's JSON-schema generator dispatches this way throughout.
+- **Plugins loaded by path** — a mypy or pytest plugin named in a config file has no caller in the codebase at all.
+- **A library's submodule API** — public surface is read from `__init__.py` re-exports. A symbol users import straight from a submodule (`from pydantic.v1.color import Color`) is indistinguishable from dead code without reading the docs. Treating every public submodule symbol as API would suppress almost everything and make the dead-code report useless, so it is left as-is.
 
 Two more things to hold loosely:
 
@@ -176,13 +179,13 @@ Python only.
 
 ### Measured
 
-| | This repo | A 2,700-line app | mcp SDK (123 files) | networkx (580 files) |
-|---|---|---|---|---|
-| Symbols | 171 | 126 | 1,407 | 8,337 |
-| Dependency edges | 248 | 293 | 2,905 | 13,447 |
-| Dead-code candidates | 1 | 3 | 42 | 7 |
-| Unresolved calls | 48 | 14 | 134 | 833 |
-| Index time | <0.1s | 0.3s | 0.7s | 3s |
+| | This repo | A 2,700-line app | mcp SDK | pydantic | networkx |
+|---|---|---|---|---|---|
+| Files | 14 | 21 | 123 | 105 | 580 |
+| Symbols | 171 | 126 | 1,407 | 2,300 | 8,337 |
+| Dependency edges | 248 | 293 | 2,905 | 4,527 | 13,447 |
+| Dead-code candidates | 1 | 3 | 42 | 229 | 7 |
+| Index time | <0.1s | 0.3s | 0.7s | 1.1s | 3s |
 
 Every one of those dead-code numbers started far higher. On the application it was 25, on networkx 581. Each round of checking the false positives by hand exposed a distinct gap — callbacks passed but never called, return annotations, relative imports, a package losing its own name, and same-module inheritance building its edge from the import map alone. Running it against code neither of us wrote found far more than self-analysis ever did.
 
@@ -198,7 +201,7 @@ The 7 that survive on networkx are backend-interface methods and test helpers re
 .venv/bin/python -m pytest tests -q
 ```
 
-72 tests covering call resolution, storage, impact queries, reachability, package layout, dynamic dispatch, and history mining. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
+74 tests covering call resolution, storage, impact queries, reachability, package layout, dynamic dispatch, and history mining. Nearly all are regressions for bugs found by running Epicenter against real code — the realm-collision data loss, closures collapsing into one node, relative imports never resolving, a package losing its own name, and each framework-dispatch false positive in the dead-code list.
 
 ---
 
